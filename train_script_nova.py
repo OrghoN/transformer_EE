@@ -2,7 +2,7 @@ import json
 
 from transformer_ee.train import MVtrainer
 
-with open("transformer_ee/config/input_dune.json", encoding="UTF-8", mode="r") as f:
+with open("transformer_ee/config/input_nova_mprod6_1_OPAL_nd_fhc.json", encoding="UTF-8", mode="r") as f:
     input_d = json.load(f)
 
 ## Set the path to the input data

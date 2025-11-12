@@ -102,5 +102,5 @@
             "num_layers": 12
         }
     },
-    "save_path": "save/model/NOvA/mprod6_2/nd_fhc"
+    "save_path": "save/model/NOvA/magMomentAna/nd_fhc"
 }

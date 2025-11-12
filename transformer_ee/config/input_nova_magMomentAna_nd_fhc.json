@@ -1,5 +1,5 @@
 {
-    "data_path": "transformer_ee/data/nova/magMomentana/nd_fhc_data.csv.xz",
+    "data_path": "transformer_ee/data/nova/magMomentAna/nd_fhc_data.csv.xz",
     "num_workers": 10,
     "dataframe_type": "polars",
     "vector": [

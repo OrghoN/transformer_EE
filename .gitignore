@@ -13,6 +13,12 @@ plot
 *.npy
 *.npz
 
+# emacs
+*~
+
+# nohup
+*.out
+
 # compressed files
 *.xz
 *.zip

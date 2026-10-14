@@ -53,5 +53,5 @@ mkdir -p /pnfs/nova/scratch/users/$USER/transformer_ee_csv/mag_moment_data/nd_ba
 mkdir -p /pnfs/nova/scratch/users/$USER/transformer_ee_csv/mag_moment_data/nd_background_data/systematically_shifted/6
 
 # Set group permission so grid can write
-chmod g+w /pnfs/nova/scratch/users/$USER/transformer_ee_csv
+chmod -R g+w /pnfs/nova/scratch/users/$USER/transformer_ee_csv
 

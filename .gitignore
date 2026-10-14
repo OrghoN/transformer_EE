@@ -31,3 +31,4 @@ save
 sync.bash
 test_script*
 wandb/
+*\#*

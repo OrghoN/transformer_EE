@@ -1,0 +1,254 @@
+// mec_extractor.C
+//
+// Writes a CSV sample for transformer_ee from a dedicated ND FHC GENIE nu_e CC MEC
+// single-interaction ("singles") sample: prod5.1 reco, release S23-06-22, nonswap,
+// SAM definition YiwenXiao_NueCCMEC_Single_NJobs7500_CAF_NonSwap_filematch (owner yxiao).
+// It is an optional background sample in the sense of TRAINING_CUTS.md §3. It is enriched
+// in nu_e CC MEC, a channel the nominal ND MC (nd_bg_extractor.C) barely populates.
+//
+// Targets: the model regresses the same two targets as for the signal sample
+// (transformer_ee/config/input_nova_magMomentAna_nd_fhc.json):
+//   trueE     -- true incoming neutrino energy                   (mc.nu[0].E)
+//   trueLepE  -- true energy of the primary electron (e-/e+)     (nuone::kTrueElectronE)
+// For nu_e CC the primary electron is the outgoing CC lepton, so trueLepE is well defined,
+// and the truth cut requires trueLepE > 0 (no -0.5 sentinel), as the signal macro does.
+// leadPngTrueE / leadPngTruePdg are kept only as diagnostics: in MEC the leading prong can
+// be a knocked-out proton instead of the electron.
+//
+// Truth: nu_e or nu_e-bar CC, GENIE mode 10 (MEC), not fiducial nu-e elastic scattering,
+// with a primary electron. In this sample every true interaction should be of this kind; the
+// cut makes it explicit so that an unexpected event is removed instead of mislabelled.
+//
+// Reco selection: the training cutflow of TRAINING_CUTS.md §4. It is identical to
+// enhanced_nu_on_e_extractor.C and nd_bg_extractor.C. Do not change it here alone.
+//
+// Columns: exactly the schema of nd_bg_extractor.C (signal columns + 11 background columns
+// leadPng* / is*), in the same order, so the two CSVs can be merged with merge_csv.sh (which
+// concatenates by position and keeps the first file's header). For this reason no xsecWgt or
+// sampleId column is added; MEC rows are mode == 10 && isNueCC == 1.
+//
+// Normalisation: a singles sample has an arbitrary rate relative to the nominal MC, and
+// "weight" (PPFX flux) does not correct for it. Mixed naively with nd_bg, nu_e CC MEC is
+// over-represented and double-counted (nd_bg contains natural nu_e CC MEC rows). See
+// docs/MEC_FIX_LOG.md before mixing.
+//
+// Note: CAFAna/Cuts/NuoneCuts.h and NuMagMomentAna/Cuts/*.h both declare names in
+// namespace nuone, so they cannot be included together. This macro uses the CAFAna one.
+
+#include <iostream>
+#include <string>
+
+#include "3FlavorAna/Vars/TransformerEHelperVars.h"
+#include "3FlavorAna/Vars/NueEnergy2024.h"
+#include "3FlavorAna/Vars/NumuVars.h"
+#include "CAFAna/Analysis/CSVMaker.h"
+#include "CAFAna/Cuts/NuoneCuts.h"
+#include "CAFAna/Cuts/SpillCuts.h"
+#include "CAFAna/Cuts/TruthCuts.h"
+#include "CAFAna/Vars/NuoneVars.h"
+#include "CAFAna/Weights/PPFXWeights.h"
+#include "StandardRecord/Proxy/SRProxy.h"
+
+using namespace ana;
+
+const std::string DATA =
+    "YiwenXiao_NueCCMEC_Single_NJobs7500_CAF_NonSwap_filematch";
+
+// ---------------------------------------------------------------------------
+// Training-cut thresholds (TRAINING_CUTS.md §4). Analysis (Table 12) values are in
+// the comments. All are proposed starting points, not validated values.
+// ---------------------------------------------------------------------------
+const double kTrainLongestProngMax = 800.;  // ana: 600 cm   (= ND-group value)
+const int    kTrainNPlaneMax       = 120;   // ana: 95       (= ND-group value)
+const int    kTrainNCellMax        = 600;   // ana: 200      (= ND-group value)
+const double kTrainShwEFracMin     = 0.5;   // ana: 0.8      (lower edge of the §4 validation region)
+const double kTrainVtxEMax         = 0.05;  // ana: 0.016 GeV
+const double kTrainGapMax          = 20.;   // ana: 10 cm    (= ND-group value)
+const double kTrainShowerEMin      = 0.1;   // ana: 0.3 GeV
+const double kTrainShowerEMax      = 10.;   // ana: 5 GeV
+// nuoneid, epi0id, eth2: no training cut (stored as flag columns).
+
+// ---------------------------------------------------------------------------
+// Truth: nu_e / nu_e-bar CC MEC (GENIE mode 10, caf::kMEC in StandardRecord/SREnums.h).
+// ana::kHasNu (CAFAna/Cuts/TruthCuts.h, mc.nnu > 0) removes slices with no true neutrino.
+// nuone::kNuoneBkg (= !kNuoneSigFid) is the ND nu-on-e group's background definition,
+// kept for consistency with nd_bg_extractor.C. kHasTrueElectron makes sure the trueLepE
+// target is defined (same cut as enhanced_nu_on_e_extractor.C); kTrueEPositive does the
+// same for trueE.
+// ---------------------------------------------------------------------------
+const Cut kIsMEC([](const caf::SRProxy *sr) {
+  return sr->mc.nnu > 0 && sr->mc.nu[0].mode == caf::kMEC;
+});
+const Cut kHasTrueElectron = nuone::kTrueElectronE > 0;
+const Cut kTrueEPositive([](const caf::SRProxy *sr) {
+  return sr->mc.nnu > 0 && sr->mc.nu[0].E > 0;
+});
+const Cut kIsMECTruth =
+    kHasNu && nuone::kNuoneBkg && (nuone::kNueCC || nuone::kNuebarCC) && kIsMEC &&
+    kHasTrueElectron && kTrueEPositive;
+
+// ---------------------------------------------------------------------------
+// Reco training selection
+// ---------------------------------------------------------------------------
+const Cut kVtxIsValid([](const caf::SRProxy *sr) { return bool(sr->vtx.elastic.IsValid); });
+const Cut kHasPng = nuone::knpng > 0;
+
+const Cut kTrainLongestProng = nuone::kfLongestProng >= 0 && nuone::kfLongestProng < kTrainLongestProngMax;
+const Cut kTrainNPlane       = nuone::kNPlane < kTrainNPlaneMax;
+const Cut kTrainNCell        = nuone::kNCell < kTrainNCellMax;
+const Cut kTrainShwEFrac     = nuone::kShwEFrac > kTrainShwEFracMin;
+const Cut kTrainVtxE         = nuone::kEvtx < kTrainVtxEMax;
+const Cut kTrainGap          = nuone::kGap < kTrainGapMax;
+const Cut kTrainShowerE      = nuone::kShowerE > kTrainShowerEMin && nuone::kShowerE < kTrainShowerEMax;
+
+const Cut kTrainingSelection =
+    kVtxIsValid && kHasPng &&
+    nuone::ktimeCut &&                                   // closestSlc: keep (as analysis)
+    kTrainLongestProng && kTrainNPlane && kTrainNCell &&
+    nuone::knuoneFiducial &&                             // fiducial: keep, Table 7 box
+    nuone::kcontainment &&                               // containment: keep, Table 7 box
+    kTrainShwEFrac && kTrainVtxE && kTrainGap &&
+    kTrainShowerE;
+
+const Cut cut = kIsMECTruth && kTrainingSelection;
+
+// ---------------------------------------------------------------------------
+// Analysis cutflow (sarahTechNote.pdf Table 12), written as pass/fail bits for
+// evaluation. Built from the same Vars as above with the tech-note values. The
+// library's nuone::kPreselection uses the older ND-group values, so it is not used.
+// ---------------------------------------------------------------------------
+const Cut kAnaPreselection =
+    kVtxIsValid && kHasPng && nuone::ktimeCut &&
+    nuone::kfLongestProng >= 0 && nuone::kfLongestProng < 600 &&
+    nuone::kNPlane < 95 && nuone::kNCell < 200 &&
+    nuone::knuoneFiducial && nuone::kcontainment &&
+    nuone::kShwEFrac > 0.8 && nuone::kEvtx < 0.016 && nuone::kGap < 10 &&
+    nuone::kShowerE > 0.3 && nuone::kShowerE < 5.0;
+const Cut kAnaCNN       = nuone::knuoneid && nuone::kepi0id;  // > 0.73, > 0.92
+const Cut kAnaFull      = kAnaPreselection && kAnaCNN && nuone::ketheta2;  // eth2 < 0.005
+
+// ---------------------------------------------------------------------------
+// Output columns
+// ---------------------------------------------------------------------------
+const Var kTrueElectronETheta2 = nuone::kTrueElectronE * nuone::kTrueElectronAngle * nuone::kTrueElectronAngle;
+
+const std::vector<std::pair<std::string, Var>> TRUTH_VAR_DEFS({
+    {"mode",             SIMPLEVAR(mc.nu[0].mode)},
+    {"nuPdg",            SIMPLEVAR(mc.nu[0].pdg)},
+    {"trueE",            SIMPLEVAR(mc.nu[0].E)},     // target 1: true neutrino energy
+    {"trueLepE",         nuone::kTrueElectronE},     // target 2: true primary-electron energy (CC lepton here)
+    {"trueElectronTheta", nuone::kTrueElectronAngle},
+    {"trueEtheta2",      kTrueElectronETheta2},
+    {"trueVtxX",         nuone::kNuVtxX},
+    {"trueVtxY",         nuone::kNuVtxY},
+    {"trueVtxZ",         nuone::kNuVtxZ},
+});
+
+// Baseline reco energies for comparison with the transformer.
+const std::vector<std::pair<std::string, Var>> RECO_VAR_DEFS({
+    {"shwCalE",     nuone::kShowerE},  // tech-note electron-energy estimator (leading-shower calE)
+    {"nueRecoLepE", kEME_2024},
+    {"nueRecoHadE", kHADE_2024},
+    {"nueRecoE",    kNueEnergy2024},
+});
+
+// Flag columns: every cut variable of the analysis cutflow, plus pass bits.
+const std::vector<std::pair<std::string, Var>> FLAG_VAR_DEFS({
+    {"closestSlcTime", nuone::kslcClosestSliceTime},
+    {"nPng",           nuone::knpng},
+    {"longestProng",   nuone::kfLongestProng},
+    {"nPlane",         nuone::kNPlane},
+    {"nCell",          nuone::kNCell},
+    {"vtxX",           nuone::kVtxX},
+    {"vtxY",           nuone::kVtxY},
+    {"vtxZ",           nuone::kVtxZ},
+    {"pngMinX",        nuone::kMinX},
+    {"pngMaxX",        nuone::kMaxX},
+    {"pngMinY",        nuone::kMinY},
+    {"pngMaxY",        nuone::kMaxY},
+    {"pngMinZ",        nuone::kMinZ},
+    {"pngMaxZ",        nuone::kMaxZ},
+    {"shwEFrac",       nuone::kShwEFrac},
+    {"vtxE",           nuone::kEvtx},
+    {"gap",            nuone::kGap},
+    {"nuoneid",        nuone::kNuoneID},
+    {"epi0id",         nuone::kEpi0ID},
+    {"etheta2",        nuone::kEtheta2},
+    {"theta",          nuone::kMyAngle},
+    {"passAnaPresel",  VarFromCut(kAnaPreselection)},
+    {"passAnaFull",    VarFromCut(kAnaFull)},
+});
+
+// ---------------------------------------------------------------------------
+// Background labels: truth match of the leading prong, the same prong nuone::kShowerE
+// uses (vtx.elastic.fuzzyk.png[0]). -5 = no valid vertex / no prong.
+// ---------------------------------------------------------------------------
+#define LEAD_PNG_TRUTH_VAR(NAME, EXPR)                                          \
+  const Var NAME([](const caf::SRProxy *sr) -> float {                         \
+    if (!sr->vtx.elastic.IsValid || sr->vtx.elastic.fuzzyk.npng < 1) return -5.f; \
+    return float(sr->vtx.elastic.fuzzyk.png[0].truth.EXPR);                     \
+  });
+LEAD_PNG_TRUTH_VAR(kLeadPngTrueE,     p.E)
+LEAD_PNG_TRUTH_VAR(kLeadPngTruePdg,   pdg)
+LEAD_PNG_TRUTH_VAR(kLeadPngMotherE,   motherp.E)   // eve mother, e.g. the pi0 of a photon shower
+LEAD_PNG_TRUTH_VAR(kLeadPngMotherPdg, motherpdg)
+LEAD_PNG_TRUTH_VAR(kLeadPngEff,       eff)
+LEAD_PNG_TRUTH_VAR(kLeadPngPur,       pur)
+#undef LEAD_PNG_TRUTH_VAR
+
+const std::vector<std::pair<std::string, Var>> BKG_LABEL_VAR_DEFS({
+    {"leadPngTrueE",     kLeadPngTrueE},
+    {"leadPngTruePdg",   kLeadPngTruePdg},
+    {"leadPngMotherE",   kLeadPngMotherE},
+    {"leadPngMotherPdg", kLeadPngMotherPdg},
+    {"leadPngEff",       kLeadPngEff},
+    {"leadPngPur",       kLeadPngPur},
+});
+
+// Category bits, as in nuone::nominal_chns (NuoneCuts.h).
+const std::vector<std::pair<std::string, Var>> CATEGORY_VAR_DEFS({
+    {"isNuoneSig", VarFromCut(nuone::kNuoneSigFid)},
+    {"isNueCC",    VarFromCut(nuone::kNueCC || nuone::kNuebarCC)},
+    {"isNumuCC",   VarFromCut(nuone::kNumuCC || nuone::kNumubarCC)},
+    {"isNC",       VarFromCut(nuone::kNC)},
+    {"isCC",       SIMPLEVAR(mc.nu[0].iscc)},
+});
+
+const std::vector<std::pair<std::string, Var>> EXTRA_VAR_DEFS({
+    {"cvn.numuid",  kCVNm},
+    {"cvn.nueid",   kCVNe},
+    {"cvn.nutauid", kCVNt},
+    {"cvn.ncid",    kCVNnc},
+    {"run",         SIMPLEVAR(hdr.run)},
+    {"subrun",      SIMPLEVAR(hdr.subrun)},
+    {"evt",         SIMPLEVAR(hdr.evt)},
+    {"subevt",      SIMPLEVAR(hdr.subevt)},
+});
+
+void mec_extractor() {
+    CSVMaker maker(DATA, "dataset_transformer_ee_mec.csv");
+    maker.setPrecision(6);
+
+    maker.addVars(transformer_cafana::kSliceVarDefs);
+
+    maker.addVars(TRUTH_VAR_DEFS);
+    maker.addVars(RECO_VAR_DEFS);
+    maker.addVars(FLAG_VAR_DEFS);
+    maker.addVars(EXTRA_VAR_DEFS);
+    maker.addVars(BKG_LABEL_VAR_DEFS);   // background-only columns
+    maker.addVars(CATEGORY_VAR_DEFS);    // background-only columns
+
+    maker.addMultiVars(transformer_cafana::kPng3dVarDefs);
+
+    // Physics weights, kept separate from any training weight (TRAINING_CUTS.md §3).
+    // "weight" is unchanged from the previous macro (flux only).
+    maker.addVar("weight",  VarFromWeight(kPPFXFluxCVWgt));
+    // No "xsecWgt" (or "sampleId") column: the header must stay identical to
+    // dataset_transformer_ee_nd_bg.csv so the CSVs can be merged by position. This sample
+    // is plain GENIE, so kXSecCVWgt2024 could be added, but only to all macros at once.
+
+    maker.SetSpillCut(kStandardSpillCuts);
+    maker.setCut(cut);
+
+    maker.Go();
+}

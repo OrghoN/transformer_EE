@@ -10,12 +10,16 @@
 // mainly NC pi0, numu CC with a pi0, and nue CC. Slices with no true neutrino are
 // dropped because they have no label.
 //
-// Labels: the same columns as the signal macro (enhanced_nu_on_e_extractor.C), so the
-// two CSVs share those columns. For background, trueLepE (nuone::kTrueElectronE) is the
-// -0.5 sentinel unless there is a primary e+-, so this macro also writes the truth match
-// of the leading prong (lead*), i.e. the particle that produced the leading shower
-// (TRAINING_CUTS.md §3), and category bits (isNuoneSig/isNueCC/isNumuCC/isNC/isCC) as in
-// nuone::nominal_chns. These extra columns are NOT in the signal CSV.
+// Labels: for background, trueLepE (nuone::kTrueElectronE) is the -0.5 sentinel unless
+// there is a primary e+-, so the truth match of the leading prong (lead*), i.e. the
+// particle that produced the leading shower (TRAINING_CUTS.md §3), and category bits
+// (isNuoneSig/isNueCC/isNumuCC/isNC/isCC, as in nuone::nominal_chns) are also written.
+//
+// Columns: enhanced_nu_on_e_extractor.C, nd_bg_extractor.C and mec_extractor.C write ONE
+// shared schema (same names, same order), so their CSVs can be merged with merge_csv.sh,
+// which concatenates by position and keeps the first file's header. CSVMaker writes all
+// Vars in add order, then all MultiVars. Any column change must be made in all three
+// macros at once. See docs/CSV_SCHEMA_ALIGNMENT_LOG.md.
 //
 // The reco selection is the *training* cutflow of TRAINING_CUTS.md §4, identical to the
 // signal macro. Cuts it loosens or drops are written as flag columns (TRAINING_CUTS.md §5).
@@ -187,7 +191,7 @@ const std::vector<std::pair<std::string, Var>> BKG_LABEL_VAR_DEFS({
 
 // Category bits, as in nuone::nominal_chns (NuoneCuts.h).
 const std::vector<std::pair<std::string, Var>> CATEGORY_VAR_DEFS({
-    {"isNuoneSig", VarFromCut(nuone::kNuoneSigFid)},
+    {"isNuoneSig", VarFromCut(nuone::kNuoneSigFid || nuone::kOverlaidNuoneSigFid)},  // mode 5 or overlaid 10005
     {"isNueCC",    VarFromCut(nuone::kNueCC || nuone::kNuebarCC)},
     {"isNumuCC",   VarFromCut(nuone::kNumuCC || nuone::kNumubarCC)},
     {"isNC",       VarFromCut(nuone::kNC)},
@@ -215,8 +219,8 @@ void nd_bg_extractor() {
     maker.addVars(RECO_VAR_DEFS);
     maker.addVars(FLAG_VAR_DEFS);
     maker.addVars(EXTRA_VAR_DEFS);
-    maker.addVars(BKG_LABEL_VAR_DEFS);   // background-only columns
-    maker.addVars(CATEGORY_VAR_DEFS);    // background-only columns
+    maker.addVars(BKG_LABEL_VAR_DEFS);   // shared-schema columns (see header)
+    maker.addVars(CATEGORY_VAR_DEFS);    // shared-schema columns (see header)
 
     maker.addMultiVars(transformer_cafana::kPng3dVarDefs);
 

@@ -22,10 +22,11 @@
 // Reco selection: the training cutflow of TRAINING_CUTS.md §4. It is identical to
 // enhanced_nu_on_e_extractor.C and nd_bg_extractor.C. Do not change it here alone.
 //
-// Columns: exactly the schema of nd_bg_extractor.C (signal columns + 11 background columns
-// leadPng* / is*), in the same order, so the two CSVs can be merged with merge_csv.sh (which
-// concatenates by position and keeps the first file's header). For this reason no xsecWgt or
-// sampleId column is added; MEC rows are mode == 10 && isNueCC == 1.
+// Columns: enhanced_nu_on_e_extractor.C, nd_bg_extractor.C and mec_extractor.C write ONE
+// shared schema (same names, same order), so their CSVs can be merged with merge_csv.sh
+// (which concatenates by position and keeps the first file's header). Any column change
+// must be made in all three macros at once (docs/CSV_SCHEMA_ALIGNMENT_LOG.md). For this
+// reason no xsecWgt or sampleId column is added; MEC rows are mode == 10 && isNueCC == 1.
 //
 // Normalisation: a singles sample has an arbitrary rate relative to the nominal MC, and
 // "weight" (PPFX flux) does not correct for it. Mixed naively with nd_bg, nu_e CC MEC is
@@ -207,7 +208,7 @@ const std::vector<std::pair<std::string, Var>> BKG_LABEL_VAR_DEFS({
 
 // Category bits, as in nuone::nominal_chns (NuoneCuts.h).
 const std::vector<std::pair<std::string, Var>> CATEGORY_VAR_DEFS({
-    {"isNuoneSig", VarFromCut(nuone::kNuoneSigFid)},
+    {"isNuoneSig", VarFromCut(nuone::kNuoneSigFid || nuone::kOverlaidNuoneSigFid)},  // mode 5 or overlaid 10005
     {"isNueCC",    VarFromCut(nuone::kNueCC || nuone::kNuebarCC)},
     {"isNumuCC",   VarFromCut(nuone::kNumuCC || nuone::kNumubarCC)},
     {"isNC",       VarFromCut(nuone::kNC)},
@@ -235,8 +236,8 @@ void mec_extractor() {
     maker.addVars(RECO_VAR_DEFS);
     maker.addVars(FLAG_VAR_DEFS);
     maker.addVars(EXTRA_VAR_DEFS);
-    maker.addVars(BKG_LABEL_VAR_DEFS);   // background-only columns
-    maker.addVars(CATEGORY_VAR_DEFS);    // background-only columns
+    maker.addVars(BKG_LABEL_VAR_DEFS);   // shared-schema columns (see header)
+    maker.addVars(CATEGORY_VAR_DEFS);    // shared-schema columns (see header)
 
     maker.addMultiVars(transformer_cafana::kPng3dVarDefs);
 

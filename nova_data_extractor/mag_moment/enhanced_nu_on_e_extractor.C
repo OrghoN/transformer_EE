@@ -14,6 +14,15 @@
 // columns, so the analysis cutflow can still be applied at evaluation time
 // (TRAINING_CUTS.md §5).
 //
+// Columns: enhanced_nu_on_e_extractor.C, nd_bg_extractor.C and mec_extractor.C write ONE
+// shared schema (same names, same order), so their CSVs can be merged with merge_csv.sh,
+// which concatenates by position and keeps the first file's header. For this reason this
+// macro also writes the leading-prong truth match (leadPng*) and the category bits (is*).
+// For signal, they show whether the leading shower is the recoil electron, and they allow
+// a merged file to be split by category. CSVMaker writes all Vars in add order, then all
+// MultiVars. Any column change must be made in all three macros at once. See
+// docs/CSV_SCHEMA_ALIGNMENT_LOG.md.
+//
 // Note: CAFAna/Cuts/NuoneCuts.h and NuMagMomentAna/Cuts/*.h both declare names in
 // namespace nuone, so they cannot be included together. This macro uses the CAFAna one.
 
@@ -152,6 +161,41 @@ const std::vector<std::pair<std::string, Var>> FLAG_VAR_DEFS({
     {"passAnaFull",    VarFromCut(kAnaFull)},
 });
 
+// ---------------------------------------------------------------------------
+// Background labels: truth match of the leading prong, the same prong nuone::kShowerE
+// uses (vtx.elastic.fuzzyk.png[0]). -5 = no valid vertex / no prong.
+// ---------------------------------------------------------------------------
+#define LEAD_PNG_TRUTH_VAR(NAME, EXPR)                                          \
+  const Var NAME([](const caf::SRProxy *sr) -> float {                         \
+    if (!sr->vtx.elastic.IsValid || sr->vtx.elastic.fuzzyk.npng < 1) return -5.f; \
+    return float(sr->vtx.elastic.fuzzyk.png[0].truth.EXPR);                     \
+  });
+LEAD_PNG_TRUTH_VAR(kLeadPngTrueE,     p.E)
+LEAD_PNG_TRUTH_VAR(kLeadPngTruePdg,   pdg)
+LEAD_PNG_TRUTH_VAR(kLeadPngMotherE,   motherp.E)   // eve mother, e.g. the pi0 of a photon shower
+LEAD_PNG_TRUTH_VAR(kLeadPngMotherPdg, motherpdg)
+LEAD_PNG_TRUTH_VAR(kLeadPngEff,       eff)
+LEAD_PNG_TRUTH_VAR(kLeadPngPur,       pur)
+#undef LEAD_PNG_TRUTH_VAR
+
+const std::vector<std::pair<std::string, Var>> BKG_LABEL_VAR_DEFS({
+    {"leadPngTrueE",     kLeadPngTrueE},
+    {"leadPngTruePdg",   kLeadPngTruePdg},
+    {"leadPngMotherE",   kLeadPngMotherE},
+    {"leadPngMotherPdg", kLeadPngMotherPdg},
+    {"leadPngEff",       kLeadPngEff},
+    {"leadPngPur",       kLeadPngPur},
+});
+
+// Category bits, as in nuone::nominal_chns (NuoneCuts.h).
+const std::vector<std::pair<std::string, Var>> CATEGORY_VAR_DEFS({
+    {"isNuoneSig", VarFromCut(nuone::kNuoneSigFid || nuone::kOverlaidNuoneSigFid)},  // mode 5 or overlaid 10005
+    {"isNueCC",    VarFromCut(nuone::kNueCC || nuone::kNuebarCC)},
+    {"isNumuCC",   VarFromCut(nuone::kNumuCC || nuone::kNumubarCC)},
+    {"isNC",       VarFromCut(nuone::kNC)},
+    {"isCC",       SIMPLEVAR(mc.nu[0].iscc)},
+});
+
 const std::vector<std::pair<std::string, Var>> EXTRA_VAR_DEFS({
     {"cvn.numuid",  kCVNm},
     {"cvn.nueid",   kCVNe},
@@ -173,6 +217,8 @@ void enhanced_nu_on_e_extractor() {
     maker.addVars(RECO_VAR_DEFS);
     maker.addVars(FLAG_VAR_DEFS);
     maker.addVars(EXTRA_VAR_DEFS);
+    maker.addVars(BKG_LABEL_VAR_DEFS);   // shared-schema columns (see header)
+    maker.addVars(CATEGORY_VAR_DEFS);    // shared-schema columns (see header)
 
     maker.addMultiVars(transformer_cafana::kPng3dVarDefs);
 

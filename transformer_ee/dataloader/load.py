@@ -122,7 +122,9 @@ def get_train_valid_test_dataloader(config: dict):  # pylint: disable=R0914
             get_polars_df_from_file,
         )
 
-        df = get_polars_df_from_file(config["data_path"])
+        df = get_polars_df_from_file(
+            config["data_path"], string_columns=config["vector"]
+        )
         randomdf = df.sample(fraction=1.0, seed=config["seed"], shuffle=True)
         del df
         sizes = get_sample_sizes(randomdf.height, config)

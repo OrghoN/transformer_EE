@@ -37,11 +37,32 @@ def MAPE_loss(output, target, weight=None):
     return torch.mean(weight * torch.abs(output - target) / target)
 
 
+def masked_MAPE_loss(output, target, weight=None):
+    """
+    mean absolute percentage error loss that ignores entries with target <= 0
+    (e.g. the trueLepE = -0.5 placeholder of background events without a primary electron).
+    The mean is taken over the remaining entries only; if there are none, the loss is 0.
+    Plain MAPE_loss is left unchanged so that other configs are not affected.
+    """
+    mask = target > 0
+    # Use a safe denominator for masked entries so no inf/nan enters the graph.
+    safe_target = torch.where(mask, target, torch.ones_like(target))
+    term = torch.abs(output - target) / safe_target
+    if weight is not None:
+        term = weight * term
+    term = torch.where(mask, term, torch.zeros_like(term))
+    n = mask.sum()
+    if n == 0:
+        return term.sum() * 0.0
+    return term.sum() / n
+
+
 # add base loss functions to loss_function dictionary
 loss_function = {
     "mean squared error": MSE_loss,
     "mean absolute error": MAE_loss,
     "mean absolute percentage error": MAPE_loss,
+    "masked mean absolute percentage error": masked_MAPE_loss,
 }
 
 

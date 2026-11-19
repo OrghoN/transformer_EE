@@ -9,9 +9,22 @@ from torch.utils.data import Dataset
 from transformer_ee.utils.weights import create_weighter
 
 
-def get_polars_df_from_xz_file(file_path):
+def _schema_overrides(string_columns):
+    """
+    Force the given columns to be read as strings (pl.Utf8).
+
+    The prong (vector) columns hold comma-separated lists. Without an override polars infers
+    each column's type from the first rows, and if those are all single-prong events the column
+    is read as a float, which breaks the later .str.split.
+    NOTE: schema_overrides needs polars >= 0.20.31 (older versions call it dtypes).
+    """
+    return {c: pl.Utf8 for c in string_columns}
+
+
+def get_polars_df_from_xz_file(file_path, string_columns=()):
     """
     Reads an xz file and returns a Polars DataFrame.
+    Columns in string_columns are read as strings.
     """
 
     with open(file_path, "rb") as f:
@@ -20,15 +33,18 @@ def get_polars_df_from_xz_file(file_path):
     print("Decompressing data from xz file", file_path, "to memory...")
     decompressed_data = lzma.decompress(memory_file.read())
     decompressed_memory_file = io.BytesIO(decompressed_data)
-    return pl.read_csv(decompressed_memory_file)
+    return pl.read_csv(
+        decompressed_memory_file, schema_overrides=_schema_overrides(string_columns)
+    )
 
 
-def get_polars_df_from_file(file_path):
+def get_polars_df_from_file(file_path, string_columns=()):
     """
     Reads a file and returns a Polars DataFrame.
 
     Args:
         file_path (str): The path to the file.
+        string_columns (iterable of str): columns to read as strings (e.g. config["vector"]).
 
     Returns:
         pl.DataFrame: A Polars DataFrame containing the data from the file.
@@ -37,9 +53,9 @@ def get_polars_df_from_file(file_path):
         ValueError: If the file format is not supported.
     """
     if file_path.endswith(".csv"):
-        return pl.read_csv(file_path)
+        return pl.read_csv(file_path, schema_overrides=_schema_overrides(string_columns))
     elif file_path.endswith(".xz"):
-        return get_polars_df_from_xz_file(file_path)
+        return get_polars_df_from_xz_file(file_path, string_columns=string_columns)
     else:
         raise ValueError("File format not supported")
 
@@ -54,6 +70,12 @@ class Polars_Dataset(Dataset): # pylint: disable=C0103, W0223
         self.config = config.copy()
 
         self.df = dtframe
+
+        # Raw copy of the evaluation columns (config key "eval_columns"), taken BEFORE any
+        # normalisation: normalize() rewrites scalar columns in place, and a column may be
+        # both a scalar input and an evaluation column (e.g. shwCalE).
+        # With no "eval_columns" key this is an empty frame and nothing extra is saved.
+        self.extra = self.df.select(config.get("eval_columns", []))
 
         self.maxpronglen = config["max_num_prongs"]
         self.vectornames = config["vector"]

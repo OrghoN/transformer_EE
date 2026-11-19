@@ -9,11 +9,6 @@
         "png.start.x",
         "png.start.y",
         "png.start.z",
-	"png.cvnpart.muonid",
-        "png.cvnpart.electronid",
-        "png.cvnpart.pionid",
-        "png.cvnpart.protonid",
-        "png.cvnpart.photonid",
         "png.bpf[0].energy",
         "png.bpf[0].overlapE",
         "png.bpf[0].momentum.x",
@@ -41,17 +36,27 @@
         "remPngCalE",
         "nHit",
         "orphCalE",
-        "coarseTiming",
-        "lowGain"
+        "lowGain",
+        "shwCalE",
+        "theta",
+        "nPng",
+        "shwEFrac",
+        "vtxE",
+        "gap"
     ],
     "target": [
-        "trueE",
-        "trueLepE"
+        "trueLepE",
+        "trueE"
     ],
     "weight": {
         "name": "FlatSpectraWeights",
         "kwargs": {
-            "alpha": 0.05
+            "alpha": 0.05,
+            "bins": 50,
+            "range": [
+                0.1,
+                10
+            ]
         }
     },
     "noise": {
@@ -67,9 +72,26 @@
         "scalar": [
             "calE",
             "orphCalE",
-            "remPngCalE"
+            "remPngCalE",
+            "shwCalE"
         ]
     },
+    "eval_columns": [
+        "passAnaPresel",
+        "passAnaFull",
+        "shwCalE",
+        "nueRecoLepE",
+        "nueRecoE",
+        "isNuoneSig",
+        "isNueCC",
+        "isNumuCC",
+        "isNC",
+        "mode",
+        "run",
+        "subrun",
+        "evt",
+        "subevt"
+    ],
     "max_num_prongs": 10,
     "batch_size_train": 2048,
     "batch_size_valid": 256,
@@ -84,7 +106,7 @@
                 0.5
             ],
             "base_loss_names": [
-                "mean absolute percentage error",
+                "masked mean absolute percentage error",
                 "mean absolute percentage error"
             ]
         }
@@ -98,7 +120,7 @@
     "model": {
         "name": "Transformer_EE_MV",
         "kwargs": {
-            "nhead": 16,
+            "nhead": 9,
             "num_layers": 12
         }
     },

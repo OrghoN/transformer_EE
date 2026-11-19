@@ -27,8 +27,10 @@
 // Note: CAFAna/Cuts/NuoneCuts.h and NuMagMomentAna/Cuts/*.h both declare names in
 // namespace nuone, so they cannot be included together. This macro uses the CAFAna one.
 
+#include <functional>
 #include <iostream>
 #include <string>
+#include <vector>
 
 #include "3FlavorAna/Vars/TransformerEHelperVars.h"
 #include "3FlavorAna/Vars/NueEnergy2024.h"
@@ -38,6 +40,7 @@
 #include "CAFAna/Cuts/SpillCuts.h"
 #include "CAFAna/Cuts/TruthCuts.h"
 #include "CAFAna/Vars/NuoneVars.h"
+#include "CAFAna/Vars/Vars.h"
 #include "CAFAna/Weights/PPFXWeights.h"
 #include "StandardRecord/Proxy/SRProxy.h"
 
@@ -209,11 +212,176 @@ const std::vector<std::pair<std::string, Var>> EXTRA_VAR_DEFS({
     {"subevt",      SIMPLEVAR(hdr.subevt)},
 });
 
+// ---------------------------------------------------------------------------
+// transformer_ee slice and prong inputs read from vtx.elastic.fuzzyk.
+//
+// The release helper (3FlavorAna/Vars/TransformerEHelperVars.cxx) reads
+// vtx.mlvertex.fuzzyk, which is empty in these prod5.1 CAFs (all png.* columns empty,
+// orphCalE nan, remPngCalE == calE). These copies have the same column names, in the
+// same order, and the same per-field rules, but read vtx.elastic.fuzzyk instead.
+// See docs/CONFIG_PLAN_magMomentAna.md §1.1 and §3.1.
+// KEEP THIS BLOCK IDENTICAL in enhanced_nu_on_e_extractor.C, nd_bg_extractor.C and
+// mec_extractor.C.
+// ---------------------------------------------------------------------------
+namespace elastic_tfee
+{
+
+const Var kRemPngCalEElastic(
+    [](const caf::SRProxy *sr) -> double
+    {
+      double prongCalE = 0;
+      if (sr->vtx.elastic.IsValid)
+      {
+        auto &png = sr->vtx.elastic.fuzzyk.png;
+        for (size_t i = 0; i < png.size(); i++) prongCalE += png[i].calE;
+      }
+      return sr->slc.calE - prongCalE;
+    });
+
+const Var kOrphCalEElastic(
+    [](const caf::SRProxy *sr) -> double
+    {
+      if (!sr->vtx.elastic.IsValid) return -5.;
+      return sr->vtx.elastic.fuzzyk.orphCalE;
+    });
+
+MultiVar constructPng3dVar(const std::function<double(const caf::SRFuzzyKProngProxy *png)> &func)
+{
+  return MultiVar(
+      [func](const caf::SRProxy *sr)
+      {
+        std::vector<double> result;
+        if (!sr->vtx.elastic.IsValid) return result;
+
+        auto &png = sr->vtx.elastic.fuzzyk.png;
+        result.reserve(png.size());
+        for (size_t i = 0; i < png.size(); i++) result.push_back(func(&png[i]));
+        return result;
+      });
+}
+
+// Same rule as the helper: if transformercvnpart is the -5 placeholder, return 0,
+// except muonid, which is 1 for prongs longer than 500 cm.
+MultiVar constructTransformerCVNPng3dVar(
+    const std::function<double(const caf::SRFuzzyKProngProxy *png)> &func, bool isMuonID)
+{
+  return constructPng3dVar(
+      [func, isMuonID](const caf::SRFuzzyKProngProxy *png) -> double
+      {
+        if (png->transformercvnpart.muonid != -5) return func(png);
+        if (isMuonID && (png->len > 500)) return 1.0;
+        return 0.0;
+      });
+}
+
+// Same rule as the helper: 0 unless all three BPF fits are valid; index 0 = proton,
+// 1 = pion, 2 = muon.
+MultiVar constructBPFPng3dVar(const std::function<double(const caf::SRBpfTrackProxy *bpf)> &func,
+                              size_t bpfIdx)
+{
+  return constructPng3dVar(
+      [func, bpfIdx](const caf::SRFuzzyKProngProxy *png) -> double
+      {
+        if (!png->bpf.muon.IsValid || !png->bpf.pion.IsValid || !png->bpf.proton.IsValid) return 0;
+        switch (bpfIdx)
+        {
+        case 2: return func(&png->bpf.muon);
+        case 1: return func(&png->bpf.pion);
+        case 0: return func(&png->bpf.proton);
+        default: return 0;
+        }
+      });
+}
+
+} // namespace elastic_tfee
+
+#define ELASTIC_SIMPLE_PNG3D_VAR(EXPR)                                                     \
+  {"png." #EXPR, elastic_tfee::constructPng3dVar(                                          \
+                     [](const caf::SRFuzzyKProngProxy *png) -> double { return png->EXPR; })}
+
+#define ELASTIC_TFCVN_PNG3D_VAR(EXPR, ACCESSOR, ISMUON)                                    \
+  {"png." #EXPR, elastic_tfee::constructTransformerCVNPng3dVar(                            \
+                     [](const caf::SRFuzzyKProngProxy *png) -> double                      \
+                     { return png->transformercvnpart.ACCESSOR; },                         \
+                     ISMUON)}
+
+#define ELASTIC_BPF_PNG3D_VAR(EXPR, IDX)                                                   \
+  {"png.bpf[" #IDX "]." #EXPR, elastic_tfee::constructBPFPng3dVar(                         \
+                                   [](const caf::SRBpfTrackProxy *bpf) -> double           \
+                                   { return bpf->EXPR; },                                  \
+                                   IDX)}
+
+// Same six columns, same order, as transformer_cafana::kSliceVarDefs.
+const std::vector<std::pair<std::string, Var>> kSliceVarDefsElastic({
+    {"coarseTiming", transformer_cafana::kCoarseTiming},
+    {"lowGain",      transformer_cafana::kLowGain},
+    {"remPngCalE",   elastic_tfee::kRemPngCalEElastic},
+    {"nHit",         kNHit},
+    {"calE",         SIMPLEVAR(slc.calE)},
+    {"orphCalE",     elastic_tfee::kOrphCalEElastic},
+});
+
+// Same 44 columns, same order, as transformer_cafana::kPng3dVarDefs.
+const std::vector<std::pair<std::string, MultiVar>> kPng3dVarDefsElastic({
+    ELASTIC_SIMPLE_PNG3D_VAR(dir.x),
+    ELASTIC_SIMPLE_PNG3D_VAR(dir.y),
+    ELASTIC_SIMPLE_PNG3D_VAR(dir.z),
+    ELASTIC_SIMPLE_PNG3D_VAR(start.x),
+    ELASTIC_SIMPLE_PNG3D_VAR(start.y),
+    ELASTIC_SIMPLE_PNG3D_VAR(start.z),
+    ELASTIC_SIMPLE_PNG3D_VAR(len),
+    ELASTIC_SIMPLE_PNG3D_VAR(calE),
+    ELASTIC_SIMPLE_PNG3D_VAR(nhit),
+    ELASTIC_SIMPLE_PNG3D_VAR(nhitx),
+    ELASTIC_SIMPLE_PNG3D_VAR(nhity),
+    ELASTIC_SIMPLE_PNG3D_VAR(nplane),
+
+    ELASTIC_TFCVN_PNG3D_VAR(cvnpart.muonid, muonid, true),
+    ELASTIC_TFCVN_PNG3D_VAR(cvnpart.electronid, electronid, false),
+    ELASTIC_TFCVN_PNG3D_VAR(cvnpart.pionid, pionid, false),
+    ELASTIC_TFCVN_PNG3D_VAR(cvnpart.protonid, protonid, false),
+    ELASTIC_TFCVN_PNG3D_VAR(cvnpart.photonid, photonid, false),
+
+    ELASTIC_BPF_PNG3D_VAR(energy, 0),
+    ELASTIC_BPF_PNG3D_VAR(overlapE, 0),
+    ELASTIC_BPF_PNG3D_VAR(momentum.x, 0),
+    ELASTIC_BPF_PNG3D_VAR(momentum.y, 0),
+    ELASTIC_BPF_PNG3D_VAR(momentum.z, 0),
+    ELASTIC_BPF_PNG3D_VAR(nhit, 0),
+    ELASTIC_BPF_PNG3D_VAR(nhitx, 0),
+    ELASTIC_BPF_PNG3D_VAR(nhity, 0),
+    ELASTIC_BPF_PNG3D_VAR(nplane, 0),
+
+    ELASTIC_BPF_PNG3D_VAR(energy, 1),
+    ELASTIC_BPF_PNG3D_VAR(overlapE, 1),
+    ELASTIC_BPF_PNG3D_VAR(momentum.x, 1),
+    ELASTIC_BPF_PNG3D_VAR(momentum.y, 1),
+    ELASTIC_BPF_PNG3D_VAR(momentum.z, 1),
+    ELASTIC_BPF_PNG3D_VAR(nhit, 1),
+    ELASTIC_BPF_PNG3D_VAR(nhitx, 1),
+    ELASTIC_BPF_PNG3D_VAR(nhity, 1),
+    ELASTIC_BPF_PNG3D_VAR(nplane, 1),
+
+    ELASTIC_BPF_PNG3D_VAR(energy, 2),
+    ELASTIC_BPF_PNG3D_VAR(overlapE, 2),
+    ELASTIC_BPF_PNG3D_VAR(momentum.x, 2),
+    ELASTIC_BPF_PNG3D_VAR(momentum.y, 2),
+    ELASTIC_BPF_PNG3D_VAR(momentum.z, 2),
+    ELASTIC_BPF_PNG3D_VAR(nhit, 2),
+    ELASTIC_BPF_PNG3D_VAR(nhitx, 2),
+    ELASTIC_BPF_PNG3D_VAR(nhity, 2),
+    ELASTIC_BPF_PNG3D_VAR(nplane, 2),
+});
+
+#undef ELASTIC_SIMPLE_PNG3D_VAR
+#undef ELASTIC_TFCVN_PNG3D_VAR
+#undef ELASTIC_BPF_PNG3D_VAR
+
 void nd_bg_extractor() {
     CSVMaker maker(DATA, "dataset_transformer_ee_nd_bg.csv");
     maker.setPrecision(6);
 
-    maker.addVars(transformer_cafana::kSliceVarDefs);
+    maker.addVars(kSliceVarDefsElastic);   // was transformer_cafana::kSliceVarDefs (vtx.mlvertex)
 
     maker.addVars(TRUTH_VAR_DEFS);
     maker.addVars(RECO_VAR_DEFS);
@@ -222,7 +390,7 @@ void nd_bg_extractor() {
     maker.addVars(BKG_LABEL_VAR_DEFS);   // shared-schema columns (see header)
     maker.addVars(CATEGORY_VAR_DEFS);    // shared-schema columns (see header)
 
-    maker.addMultiVars(transformer_cafana::kPng3dVarDefs);
+    maker.addMultiVars(kPng3dVarDefsElastic);   // was transformer_cafana::kPng3dVarDefs (vtx.mlvertex)
 
     // Physics weights, kept separate from any training weight (TRAINING_CUTS.md §3).
     // "weight" is unchanged from the previous macro (flux only).

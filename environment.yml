@@ -1,0 +1,18 @@
+# Conda environment for transformer_ee (training on a Linux NVIDIA GPU, e.g. the EAF A100).
+#
+#     conda env create -f environment.yml      # run from the repository root
+#     conda activate transformer_ee
+#
+# conda only provides Python and pip, so its solver has almost nothing to do. Every package
+# comes from pip via requirement.txt, including a CUDA-enabled torch (see the notes there).
+# Mixing the pytorch/nvidia/conda-forge/defaults channels is what made solves slow, fail or
+# give CPU-only builds, so only conda-forge is used and `defaults` is excluded.
+name: transformer_ee
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+      - -r requirement.txt

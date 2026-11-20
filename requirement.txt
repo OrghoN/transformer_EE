@@ -1,7 +1,19 @@
+# Python packages for transformer_ee. Install with pip, e.g. via environment.yml:
+#     conda env create -f environment.yml
+# or into any Python >= 3.10 environment:
+#     python -m pip install -r requirement.txt
+#
+# torch: the default PyPI wheel for Linux x86_64 is a CUDA build and ships its own CUDA runtime
+# (only the NVIDIA driver is needed). Do NOT install PyTorch from conda (`-c pytorch` stopped at
+# 2.5; other channels can give a CPU-only build). To force a specific CUDA version instead, use
+#     python -m pip install torch --index-url https://download.pytorch.org/whl/cuXXX
+# torchvision/torchaudio are not used by transformer_ee and are not installed.
+#
+# Upper bounds on polars/pandas: the code was written and tested against these major versions;
+# polars 2 and pandas 3 change APIs/defaults it relies on. Raise them only after testing.
 numpy
 scipy
-pandas
-polars>=0.20.31
-torch
-torchvision
-torchaudio
+pandas>=2,<3
+polars>=0.20.31,<2
+matplotlib>=3.5
+torch>=2.4

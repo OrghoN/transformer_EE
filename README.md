@@ -23,10 +23,11 @@ It is recommended to use a Python virtual environment/container to run the code.
 ### Example conda setup in a Linux system with NVIDIA GPU
 Conda is a Python environment manager which allows user to create an independent virtual environment and install Python packages.
 1. make sure you have conda installed in your computer. See https://docs.anaconda.com/free/miniconda/miniconda-install/ for more details.
-2. create a new conda environment by running `conda create --name new_env_name`
-3. activate the new environment by running `conda activate new_env_name`
-4. install the required packages by running `conda install pytorch torchvision torchaudio pytorch-cuda=12.1 -c pytorch -c nvidia`, check https://pytorch.org/get-started/locally/ for the latest stable versions of PyTorch and CUDA.
-5. install other required packages by running `conda install scipy pandas polars numpy matplotlib`
+2. from the top level of this repository, create the environment with `conda env create -f environment.yml`. conda only installs Python and pip; all packages, including a CUDA-enabled PyTorch, are installed by pip from `requirement.txt`.
+3. activate the new environment by running `conda activate transformer_ee`
+4. check that the GPU is used: `python -c "import torch; print(torch.version.cuda, torch.cuda.is_available())"` must print a CUDA version and `True`.
+
+Do not install PyTorch with conda (`conda install pytorch ... -c pytorch -c nvidia`): the `pytorch` conda channel stopped at PyTorch 2.5, and mixing channels can make the solve fail or silently give a CPU-only build. Without conda, `python -m pip install -r requirement.txt` in any Python >= 3.10 environment does the same.
 
 ## (optional) Set up PYTHONPATH
 User can directly run training script without setting up environment variables by putting their script in the transformer_EE directory. The following steps are optional.

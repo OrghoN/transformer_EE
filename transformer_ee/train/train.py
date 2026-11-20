@@ -233,17 +233,18 @@ class MVtrainer:
         trueval = []
         prediction = []
 
-        for _batch_idx, batch in enumerate(self.testloader):
-            vector_valid_batch = batch[0].to(self.gpu_device)
-            scalar_valid_batch = batch[1].to(self.gpu_device)
-            mask_valid_batch = batch[2].to(self.gpu_device)
-            target_valid_batch = batch[3].to(self.gpu_device)
+        with torch.no_grad():
+            for _batch_idx, batch in enumerate(self.testloader):
+                vector_valid_batch = batch[0].to(self.gpu_device)
+                scalar_valid_batch = batch[1].to(self.gpu_device)
+                mask_valid_batch = batch[2].to(self.gpu_device)
+                target_valid_batch = batch[3].to(self.gpu_device)
 
-            Netout = self.net.forward(
-                vector_valid_batch, scalar_valid_batch, mask_valid_batch
-            )
-            trueval.append(target_valid_batch.detach().cpu().numpy())
-            prediction.append((Netout.detach().cpu().numpy()))
+                Netout = self.net.forward(
+                    vector_valid_batch, scalar_valid_batch, mask_valid_batch
+                )
+                trueval.append(target_valid_batch.detach().cpu().numpy())
+                prediction.append((Netout.detach().cpu().numpy()))
 
         trueval = np.concatenate(trueval)  # [:,0]
         prediction = np.concatenate(prediction)
@@ -252,3 +253,12 @@ class MVtrainer:
             trueval=trueval,
             prediction=prediction,
         )
+
+        # Raw config "eval_columns" of the test set, row for row in the order of result.npz
+        # (the test loader does not shuffle), so predictions can be split by selection, sample
+        # and run/subrun/evt.
+        extra = getattr(self.testloader.dataset, "extra", None)
+        if extra is not None and getattr(extra, "width", 0) > 0:
+            extra_path = os.path.join(self.save_path, "test_eval_columns.parquet")
+            extra.write_parquet(extra_path)
+            print("eval columns of the test set saved to", extra_path)

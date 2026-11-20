@@ -94,6 +94,15 @@ def get_train_valid_test_dataloader(config: dict):  # pylint: disable=R0914
     """
 
     dataframe_type = config.get("dataframe_type", "pandas")
+    if dataframe_type == "numpy":
+        # Memory-compact path: streams the CSV into a few float32 arrays, no per-sample cache.
+        # See np_reader.py / np_dataset.py.
+        from transformer_ee.dataloader.np_dataset import (  # pylint: disable=C0415
+            get_numpy_dataloaders,
+        )
+
+        return get_numpy_dataloaders(config)
+
     if dataframe_type == "pandas":
         import pandas as pd  # pylint: disable=C0415
 
@@ -144,7 +153,7 @@ def get_train_valid_test_dataloader(config: dict):  # pylint: disable=R0914
 
     else:
         raise ValueError(
-            f"Unknown dataframe_type: {dataframe_type}. Supported types: ['pandas', 'polars']"
+            f"Unknown dataframe_type: {dataframe_type}. Supported types: ['pandas', 'polars', 'numpy']"
         )
 
     train_set.statistic()

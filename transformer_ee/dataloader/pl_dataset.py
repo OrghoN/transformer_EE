@@ -9,16 +9,72 @@ from torch.utils.data import Dataset
 from transformer_ee.utils.weights import create_weighter
 
 
-def _schema_overrides(string_columns):
+def _split_csv_line(line):
     """
-    Force the given columns to be read as strings (pl.Utf8).
+    Split one CSV line (str) into raw fields, keeping the surrounding quotes, so that it can be
+    seen which fields were quoted. Commas inside quotes do not split.
+    """
+    fields, cur, in_quotes = [], [], False
+    for ch in line.rstrip("\r\n"):
+        if ch == '"':
+            in_quotes = not in_quotes
+        if ch == "," and not in_quotes:
+            fields.append("".join(cur))
+            cur = []
+        else:
+            cur.append(ch)
+    fields.append("".join(cur))
+    return fields
 
-    The prong (vector) columns hold comma-separated lists. Without an override polars infers
-    each column's type from the first rows, and if those are all single-prong events the column
-    is read as a float, which breaks the later .str.split.
+
+def _read_head_lines(raw):
+    """
+    Return (header line, first data line) as str from a CSV held in memory (bytes).
+    Uses find() so that no copy of the (possibly multi-GB) buffer is made.
+    """
+    end0 = raw.find(b"\n")
+    if end0 < 0:
+        return raw.decode("utf-8"), ""
+    end1 = raw.find(b"\n", end0 + 1)
+    if end1 < 0:
+        end1 = len(raw)
+    return raw[:end0].decode("utf-8"), raw[end0 + 1 : end1].decode("utf-8")
+
+
+def _schema_overrides(header_line, first_data_line, string_columns):
+    """
+    Fix the dtype of every column instead of letting polars infer it.
+
+    polars infers dtypes from the first 100 rows only. An integer-looking column such as
+    leadPngTruePdg was therefore read as i64, and the parse aborted when a later row held a value
+    that CSVMaker::setPrecision(6) had written in scientific notation (the nuclear PDG code
+    1.00001e+09). So no column is left to inference:
+
+    - pl.Utf8 for the columns in string_columns (the config "vector" columns), and for every
+      column that is quoted in the first data row. CSVMaker always quotes MultiVar (per-prong)
+      columns, even with one prong, so this catches the prong columns not used by the config.
+      They hold comma-separated lists; the vector ones are split later with .str.split.
+    - pl.Float64 for every other column. Float64 holds the integer columns of these files
+      (run, evt, counts, flags, PDG codes) exactly; the dataset casts to float32 anyway.
+
+    header_line:      the CSV header line (str)
+    first_data_line:  the first data row (str), used only to see which fields are quoted
+    string_columns:   iterable of column names to read as strings (e.g. config["vector"])
     NOTE: schema_overrides needs polars >= 0.20.31 (older versions call it dtypes).
     """
-    return {c: pl.Utf8 for c in string_columns}
+    header = _split_csv_line(header_line)
+    string_columns = set(string_columns)
+    missing = string_columns.difference(header)
+    if missing:
+        raise ValueError(f"Columns not found in CSV header: {sorted(missing)}")
+    first = _split_csv_line(first_data_line) if first_data_line else []
+    quoted = {
+        name for name, field in zip(header, first) if field.startswith('"')
+    }
+    return {
+        c: (pl.Utf8 if c in string_columns or c in quoted else pl.Float64)
+        for c in header
+    }
 
 
 def get_polars_df_from_xz_file(file_path, string_columns=()):
@@ -32,9 +88,11 @@ def get_polars_df_from_xz_file(file_path, string_columns=()):
     memory_file = io.BytesIO(xz_data)
     print("Decompressing data from xz file", file_path, "to memory...")
     decompressed_data = lzma.decompress(memory_file.read())
+    header_line, first_data_line = _read_head_lines(decompressed_data)
     decompressed_memory_file = io.BytesIO(decompressed_data)
     return pl.read_csv(
-        decompressed_memory_file, schema_overrides=_schema_overrides(string_columns)
+        decompressed_memory_file,
+        schema_overrides=_schema_overrides(header_line, first_data_line, string_columns),
     )
 
 
@@ -53,7 +111,13 @@ def get_polars_df_from_file(file_path, string_columns=()):
         ValueError: If the file format is not supported.
     """
     if file_path.endswith(".csv"):
-        return pl.read_csv(file_path, schema_overrides=_schema_overrides(string_columns))
+        with open(file_path, "rb") as f:
+            header_line = f.readline().decode("utf-8")
+            first_data_line = f.readline().decode("utf-8")
+        return pl.read_csv(
+            file_path,
+            schema_overrides=_schema_overrides(header_line, first_data_line, string_columns),
+        )
     elif file_path.endswith(".xz"):
         return get_polars_df_from_xz_file(file_path, string_columns=string_columns)
     else:

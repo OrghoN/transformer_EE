@@ -14,6 +14,10 @@
 // columns, so the analysis cutflow can still be applied at evaluation time
 // (TRAINING_CUTS.md §5).
 //
+// TRIMMED SCHEMA (branch trim-extractor): 53 columns, only those transformer_ee uses;
+// see the block above TRUTH_VAR_DEFS. The lead* and weight columns mentioned in this
+// header are no longer written.
+//
 // Columns: enhanced_nu_on_e_extractor.C, nd_bg_extractor.C and mec_extractor.C write ONE
 // shared schema (same names, same order), so their CSVs can be merged with merge_csv.sh,
 // which concatenates by position and keeps the first file's header. For this reason this
@@ -40,7 +44,6 @@
 #include "CAFAna/Cuts/TruthCuts.h"
 #include "CAFAna/Vars/NuoneVars.h"
 #include "CAFAna/Vars/Vars.h"
-#include "CAFAna/Weights/PPFXWeights.h"
 #include "StandardRecord/Proxy/SRProxy.h"
 
 using namespace ana;
@@ -115,79 +118,44 @@ const Cut kAnaFull      = kAnaPreselection && kAnaCNN && nuone::ketheta2;  // et
 // ---------------------------------------------------------------------------
 // Output columns
 // ---------------------------------------------------------------------------
-const Var kTrueElectronETheta2 = nuone::kTrueElectronE * nuone::kTrueElectronAngle * nuone::kTrueElectronAngle;
-
+// ---------------------------------------------------------------------------
+// TRIMMED SCHEMA (branch trim-extractor): only the columns transformer_ee uses.
+// 53 columns = the 40 training columns of config/input_nova_magMomentAna.json (27 prong
+// "vector" inputs, 11 "scalar" inputs, 2 targets) + its 14 "eval_columns", with shwCalE
+// counted once. Dropped (see docs/EXTRACTOR_TRIM_PLAN.md in the analysis area):
+//   truth:  nuPdg, trueElectronTheta, trueEtheta2, trueVtxX/Y/Z
+//   reco:   nueRecoHadE
+//   flags:  closestSlcTime, longestProng, nPlane, nCell, vtxX/Y/Z, pngMin/MaxX/Y/Z,
+//           nuoneid, epi0id, etheta2 (the cuts themselves are unchanged; the pass bits
+//           passAnaPresel/passAnaFull are still written)
+//   labels: leadPngTrueE/Pdg, leadPngMotherE/Pdg, leadPngEff/Pur
+//   other:  cvn.* (never filled), coarseTiming (always 0 in the ND), isCC (= 1 - isNC),
+//           png.cvnpart.* (never filled), png.bpf[k].nhit/nhitx/nhity/nplane (copies of
+//           png.nhit/...), weight (PPFX flux weight)
+// To keep a column, add it back here IN ALL THREE MACROS and to the config if it is an input.
+// ---------------------------------------------------------------------------
 const std::vector<std::pair<std::string, Var>> TRUTH_VAR_DEFS({
-    {"mode",             SIMPLEVAR(mc.nu[0].mode)},
-    {"nuPdg",            SIMPLEVAR(mc.nu[0].pdg)},
-    {"trueE",            SIMPLEVAR(mc.nu[0].E)},     // target 1: true neutrino energy
-    {"trueLepE",         nuone::kTrueElectronE},     // target 2: true recoil-electron energy
-    {"trueElectronTheta", nuone::kTrueElectronAngle},
-    {"trueEtheta2",      kTrueElectronETheta2},
-    {"trueVtxX",         nuone::kNuVtxX},
-    {"trueVtxY",         nuone::kNuVtxY},
-    {"trueVtxZ",         nuone::kNuVtxZ},
+    {"mode",             SIMPLEVAR(mc.nu[0].mode)},  // eval column
+    {"trueE",            SIMPLEVAR(mc.nu[0].E)},     // target: true neutrino energy
+    {"trueLepE",         nuone::kTrueElectronE},     // target: true electron energy (recoil e for nu-e, CC lepton otherwise; -0.5 if none)
 });
 
-// Baseline reco energies for comparison with the transformer.
+// Baseline reco energies for comparison with the transformer (shwCalE is also an input).
 const std::vector<std::pair<std::string, Var>> RECO_VAR_DEFS({
     {"shwCalE",     nuone::kShowerE},  // tech-note electron-energy estimator (leading-shower calE)
     {"nueRecoLepE", kEME_2024},
-    {"nueRecoHadE", kHADE_2024},
     {"nueRecoE",    kNueEnergy2024},
 });
 
-// Flag columns: every cut variable of the analysis cutflow, plus pass bits.
+// Inputs taken from the analysis cut variables, plus the cutflow pass bits (eval columns).
 const std::vector<std::pair<std::string, Var>> FLAG_VAR_DEFS({
-    {"closestSlcTime", nuone::kslcClosestSliceTime},
     {"nPng",           nuone::knpng},
-    {"longestProng",   nuone::kfLongestProng},
-    {"nPlane",         nuone::kNPlane},
-    {"nCell",          nuone::kNCell},
-    {"vtxX",           nuone::kVtxX},
-    {"vtxY",           nuone::kVtxY},
-    {"vtxZ",           nuone::kVtxZ},
-    {"pngMinX",        nuone::kMinX},
-    {"pngMaxX",        nuone::kMaxX},
-    {"pngMinY",        nuone::kMinY},
-    {"pngMaxY",        nuone::kMaxY},
-    {"pngMinZ",        nuone::kMinZ},
-    {"pngMaxZ",        nuone::kMaxZ},
     {"shwEFrac",       nuone::kShwEFrac},
     {"vtxE",           nuone::kEvtx},
     {"gap",            nuone::kGap},
-    {"nuoneid",        nuone::kNuoneID},
-    {"epi0id",         nuone::kEpi0ID},
-    {"etheta2",        nuone::kEtheta2},
     {"theta",          nuone::kMyAngle},
     {"passAnaPresel",  VarFromCut(kAnaPreselection)},
     {"passAnaFull",    VarFromCut(kAnaFull)},
-});
-
-// ---------------------------------------------------------------------------
-// Background labels: truth match of the leading prong, the same prong nuone::kShowerE
-// uses (vtx.elastic.fuzzyk.png[0]). -5 = no valid vertex / no prong.
-// ---------------------------------------------------------------------------
-#define LEAD_PNG_TRUTH_VAR(NAME, EXPR)                                          \
-  const Var NAME([](const caf::SRProxy *sr) -> float {                         \
-    if (!sr->vtx.elastic.IsValid || sr->vtx.elastic.fuzzyk.npng < 1) return -5.f; \
-    return float(sr->vtx.elastic.fuzzyk.png[0].truth.EXPR);                     \
-  });
-LEAD_PNG_TRUTH_VAR(kLeadPngTrueE,     p.E)
-LEAD_PNG_TRUTH_VAR(kLeadPngTruePdg,   pdg)
-LEAD_PNG_TRUTH_VAR(kLeadPngMotherE,   motherp.E)   // eve mother, e.g. the pi0 of a photon shower
-LEAD_PNG_TRUTH_VAR(kLeadPngMotherPdg, motherpdg)
-LEAD_PNG_TRUTH_VAR(kLeadPngEff,       eff)
-LEAD_PNG_TRUTH_VAR(kLeadPngPur,       pur)
-#undef LEAD_PNG_TRUTH_VAR
-
-const std::vector<std::pair<std::string, Var>> BKG_LABEL_VAR_DEFS({
-    {"leadPngTrueE",     kLeadPngTrueE},
-    {"leadPngTruePdg",   kLeadPngTruePdg},
-    {"leadPngMotherE",   kLeadPngMotherE},
-    {"leadPngMotherPdg", kLeadPngMotherPdg},
-    {"leadPngEff",       kLeadPngEff},
-    {"leadPngPur",       kLeadPngPur},
 });
 
 // Category bits, as in nuone::nominal_chns (NuoneCuts.h).
@@ -196,14 +164,10 @@ const std::vector<std::pair<std::string, Var>> CATEGORY_VAR_DEFS({
     {"isNueCC",    VarFromCut(nuone::kNueCC || nuone::kNuebarCC)},
     {"isNumuCC",   VarFromCut(nuone::kNumuCC || nuone::kNumubarCC)},
     {"isNC",       VarFromCut(nuone::kNC)},
-    {"isCC",       SIMPLEVAR(mc.nu[0].iscc)},
 });
 
+// Event identifiers (eval columns), to match predictions back to events.
 const std::vector<std::pair<std::string, Var>> EXTRA_VAR_DEFS({
-    {"cvn.numuid",  kCVNm},
-    {"cvn.nueid",   kCVNe},
-    {"cvn.nutauid", kCVNt},
-    {"cvn.ncid",    kCVNnc},
     {"run",         SIMPLEVAR(hdr.run)},
     {"subrun",      SIMPLEVAR(hdr.subrun)},
     {"evt",         SIMPLEVAR(hdr.evt)},
@@ -214,10 +178,9 @@ const std::vector<std::pair<std::string, Var>> EXTRA_VAR_DEFS({
 // transformer_ee slice and prong inputs read from vtx.elastic.fuzzyk.
 //
 // The release helper (3FlavorAna/Vars/TransformerEHelperVars.cxx) reads
-// vtx.mlvertex.fuzzyk, which is empty in these prod5.1 CAFs (all png.* columns empty,
-// orphCalE nan, remPngCalE == calE). These copies have the same column names, in the
-// same order, and the same per-field rules, but read vtx.elastic.fuzzyk instead.
-// See docs/CONFIG_PLAN_magMomentAna.md §1.1 and §3.1.
+// vtx.mlvertex.fuzzyk, which is empty in these prod5.1 CAFs. These copies use the same
+// column names and per-field rules, but read vtx.elastic.fuzzyk instead.
+// Trimmed: coarseTiming, png.cvnpart.* and png.bpf[k].nhit* are not written.
 // KEEP THIS BLOCK IDENTICAL in enhanced_nu_on_e_extractor.C, nd_bg_extractor.C and
 // mec_extractor.C.
 // ---------------------------------------------------------------------------
@@ -258,20 +221,6 @@ MultiVar constructPng3dVar(const std::function<double(const caf::SRFuzzyKProngPr
       });
 }
 
-// Same rule as the helper: if transformercvnpart is the -5 placeholder, return 0,
-// except muonid, which is 1 for prongs longer than 500 cm.
-MultiVar constructTransformerCVNPng3dVar(
-    const std::function<double(const caf::SRFuzzyKProngProxy *png)> &func, bool isMuonID)
-{
-  return constructPng3dVar(
-      [func, isMuonID](const caf::SRFuzzyKProngProxy *png) -> double
-      {
-        if (png->transformercvnpart.muonid != -5) return func(png);
-        if (isMuonID && (png->len > 500)) return 1.0;
-        return 0.0;
-      });
-}
-
 // Same rule as the helper: 0 unless all three BPF fits are valid; index 0 = proton,
 // 1 = pion, 2 = muon.
 MultiVar constructBPFPng3dVar(const std::function<double(const caf::SRBpfTrackProxy *bpf)> &func,
@@ -297,21 +246,14 @@ MultiVar constructBPFPng3dVar(const std::function<double(const caf::SRBpfTrackPr
   {"png." #EXPR, elastic_tfee::constructPng3dVar(                                          \
                      [](const caf::SRFuzzyKProngProxy *png) -> double { return png->EXPR; })}
 
-#define ELASTIC_TFCVN_PNG3D_VAR(EXPR, ACCESSOR, ISMUON)                                    \
-  {"png." #EXPR, elastic_tfee::constructTransformerCVNPng3dVar(                            \
-                     [](const caf::SRFuzzyKProngProxy *png) -> double                      \
-                     { return png->transformercvnpart.ACCESSOR; },                         \
-                     ISMUON)}
-
 #define ELASTIC_BPF_PNG3D_VAR(EXPR, IDX)                                                   \
   {"png.bpf[" #IDX "]." #EXPR, elastic_tfee::constructBPFPng3dVar(                         \
                                    [](const caf::SRBpfTrackProxy *bpf) -> double           \
                                    { return bpf->EXPR; },                                  \
                                    IDX)}
 
-// Same six columns, same order, as transformer_cafana::kSliceVarDefs.
+// Slice inputs (coarseTiming dropped: always 0 outside the FD).
 const std::vector<std::pair<std::string, Var>> kSliceVarDefsElastic({
-    {"coarseTiming", transformer_cafana::kCoarseTiming},
     {"lowGain",      transformer_cafana::kLowGain},
     {"remPngCalE",   elastic_tfee::kRemPngCalEElastic},
     {"nHit",         kNHit},
@@ -319,7 +261,7 @@ const std::vector<std::pair<std::string, Var>> kSliceVarDefsElastic({
     {"orphCalE",     elastic_tfee::kOrphCalEElastic},
 });
 
-// Same 44 columns, same order, as transformer_cafana::kPng3dVarDefs.
+// The 27 prong inputs of the config.
 const std::vector<std::pair<std::string, MultiVar>> kPng3dVarDefsElastic({
     ELASTIC_SIMPLE_PNG3D_VAR(dir.x),
     ELASTIC_SIMPLE_PNG3D_VAR(dir.y),
@@ -334,49 +276,34 @@ const std::vector<std::pair<std::string, MultiVar>> kPng3dVarDefsElastic({
     ELASTIC_SIMPLE_PNG3D_VAR(nhity),
     ELASTIC_SIMPLE_PNG3D_VAR(nplane),
 
-    ELASTIC_TFCVN_PNG3D_VAR(cvnpart.muonid, muonid, true),
-    ELASTIC_TFCVN_PNG3D_VAR(cvnpart.electronid, electronid, false),
-    ELASTIC_TFCVN_PNG3D_VAR(cvnpart.pionid, pionid, false),
-    ELASTIC_TFCVN_PNG3D_VAR(cvnpart.protonid, protonid, false),
-    ELASTIC_TFCVN_PNG3D_VAR(cvnpart.photonid, photonid, false),
-
     ELASTIC_BPF_PNG3D_VAR(energy, 0),
     ELASTIC_BPF_PNG3D_VAR(overlapE, 0),
     ELASTIC_BPF_PNG3D_VAR(momentum.x, 0),
     ELASTIC_BPF_PNG3D_VAR(momentum.y, 0),
     ELASTIC_BPF_PNG3D_VAR(momentum.z, 0),
-    ELASTIC_BPF_PNG3D_VAR(nhit, 0),
-    ELASTIC_BPF_PNG3D_VAR(nhitx, 0),
-    ELASTIC_BPF_PNG3D_VAR(nhity, 0),
-    ELASTIC_BPF_PNG3D_VAR(nplane, 0),
 
     ELASTIC_BPF_PNG3D_VAR(energy, 1),
     ELASTIC_BPF_PNG3D_VAR(overlapE, 1),
     ELASTIC_BPF_PNG3D_VAR(momentum.x, 1),
     ELASTIC_BPF_PNG3D_VAR(momentum.y, 1),
     ELASTIC_BPF_PNG3D_VAR(momentum.z, 1),
-    ELASTIC_BPF_PNG3D_VAR(nhit, 1),
-    ELASTIC_BPF_PNG3D_VAR(nhitx, 1),
-    ELASTIC_BPF_PNG3D_VAR(nhity, 1),
-    ELASTIC_BPF_PNG3D_VAR(nplane, 1),
 
     ELASTIC_BPF_PNG3D_VAR(energy, 2),
     ELASTIC_BPF_PNG3D_VAR(overlapE, 2),
     ELASTIC_BPF_PNG3D_VAR(momentum.x, 2),
     ELASTIC_BPF_PNG3D_VAR(momentum.y, 2),
     ELASTIC_BPF_PNG3D_VAR(momentum.z, 2),
-    ELASTIC_BPF_PNG3D_VAR(nhit, 2),
-    ELASTIC_BPF_PNG3D_VAR(nhitx, 2),
-    ELASTIC_BPF_PNG3D_VAR(nhity, 2),
-    ELASTIC_BPF_PNG3D_VAR(nplane, 2),
 });
 
 #undef ELASTIC_SIMPLE_PNG3D_VAR
-#undef ELASTIC_TFCVN_PNG3D_VAR
 #undef ELASTIC_BPF_PNG3D_VAR
 
 void enhanced_nu_on_e_extractor() {
     CSVMaker maker(DATA, "dataset_transformer_ee_enhanced_nu_on_e.csv");
+    // 6 significant digits are exact for every integer column of the trimmed schema (run,
+    // subrun, evt, subevt, mode and flags are all < 1e6) and ample for the float inputs.
+    // Raise to 10 before adding a column with larger integers (e.g. nuclear PDG codes,
+    // which 6 digits turned into 1.00001e+09).
     maker.setPrecision(6);
 
     maker.addVars(kSliceVarDefsElastic);   // was transformer_cafana::kSliceVarDefs (vtx.mlvertex)
@@ -385,17 +312,11 @@ void enhanced_nu_on_e_extractor() {
     maker.addVars(RECO_VAR_DEFS);
     maker.addVars(FLAG_VAR_DEFS);
     maker.addVars(EXTRA_VAR_DEFS);
-    maker.addVars(BKG_LABEL_VAR_DEFS);   // shared-schema columns (see header)
     maker.addVars(CATEGORY_VAR_DEFS);    // shared-schema columns (see header)
 
     maker.addMultiVars(kPng3dVarDefsElastic);   // was transformer_cafana::kPng3dVarDefs (vtx.mlvertex)
 
-    // Physics weights, kept separate from any training weight (TRAINING_CUTS.md §3).
-    // "weight" is unchanged from the previous macro (flux only).
-    maker.addVar("weight",  VarFromWeight(kPPFXFluxCVWgt));
-    // No "xsecWgt" column: kXSecCVWgt2024 (NOvARwgt) throws std::out_of_range on overlaid
-    // nu-on-e events (mode 10005, non-GENIE generator), which are all of this sample.
-    // See EMPTY_CSV_DIAGNOSIS.md.
+    // No "weight" column in the trimmed schema (PPFX flux weight; not used in training).
 
     maker.SetSpillCut(kStandardSpillCuts);
     maker.setCut(cut);

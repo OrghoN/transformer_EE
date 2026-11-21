@@ -1,5 +1,6 @@
 {
     "data_path": "transformer_ee/data/nova/magMomentAna/mag_moment_data.csv.xz",
+    "model_phys_name": "nova_magMomentAna_nd_fhc",
     "num_workers": 10,
     "dataframe_type": "polars",
     "vector": [
@@ -119,10 +120,19 @@
     },
     "model": {
         "name": "Transformer_EE_MV",
+        "epochs": 100,
         "kwargs": {
             "nhead": 9,
-            "num_layers": 12
+            "num_layers": 12,
+            "d_model": 288,
+            "dim_feedforward": 1152,
+            "norm_first": true
         }
     },
-    "save_path": "save/model/NOvA/magMomentAna/nd_fhc"
+    "save_path": "save/model/NOvA/magMomentAna/nd_fhc",
+    "early_stopping": {
+        "enabled": true,
+        "window": 8,
+        "min_delta_pct": 0.15
+    }
 }

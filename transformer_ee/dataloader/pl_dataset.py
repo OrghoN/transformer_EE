@@ -68,7 +68,7 @@ def drop_nan_rows(df: pl.DataFrame) -> pl.DataFrame:
     """
 
     # Add an internal index so we know which rows were dropped
-    df_with_idx = df.with_row_count(name="_orig_idx")
+    df_with_idx = df.with_row_index(name="_orig_idx")
 
     # --- 1) Mask for NULLs in any column ---
     null_mask_series = df_with_idx.select(

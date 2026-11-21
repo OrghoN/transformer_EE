@@ -1,7 +1,7 @@
 {
     "data_path": "transformer_ee/data/nova/magMomentAna/mag_moment_data.csv.xz",
     "num_workers": 10,
-    "dataframe_type": "numpy",
+    "dataframe_type": "polars",
     "vector": [
         "png.dir.x",
         "png.dir.y",

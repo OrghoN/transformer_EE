@@ -29,7 +29,9 @@ def _clip_nonpositive(vals: List[float], *, eps: float) -> List[float]:
 
 
 def plot_loss(metrics: Dict[str, ArrayLike], save_path: str, *, filename: str = "loss.png",
-              logy: bool = True, ymin: float = 1e-4):
+              logy: bool = True, ymin: float = 1e-4, x: ArrayLike = None,
+              ylabel: str = "Value", title: str = "Training‑time Metrics",
+              zero_line: bool = False):
     """Plot multiple learning curves on a single canvas.
 
     Parameters
@@ -45,6 +47,13 @@ def plot_loss(metrics: Dict[str, ArrayLike], save_path: str, *, filename: str = 
     ymin : float, default 1e‑3
         Minimum y‑axis value when *logy* is True. Also used to replace any
         non‑positive metric values so log(0) does not raise.
+    x : ArrayLike, optional
+        x positions in epochs (e.g. 0.5, 1.0, 1.5, … for half‑epoch points).
+        Defaults to 1, 2, …, n_epochs.
+    ylabel, title : str
+        Axis label and title.
+    zero_line : bool, default False
+        Draw a horizontal line at y = 0 (useful for bias curves).
     """
     if not metrics:
         raise ValueError("'metrics' dictionary is empty – nothing to plot.")
@@ -60,17 +69,24 @@ def plot_loss(metrics: Dict[str, ArrayLike], save_path: str, *, filename: str = 
     if logy:
         metrics_cpu = {k: _clip_nonpositive(v, eps=ymin * 0.1) for k, v in metrics_cpu.items()}
 
-    epochs = range(1, n_epochs + 1)
+    if x is None:
+        epochs = list(range(1, n_epochs + 1))
+    else:
+        epochs = _to_cpu_floats(x)
+        if len(epochs) != n_epochs:
+            raise ValueError("'x' must have the same length as the metric sequences.")
     fig, ax = plt.subplots(figsize=(10, 6))
 
     colours = plt.rcParams["axes.prop_cycle"].by_key()["color"]
     for idx, (label, values) in enumerate(metrics_cpu.items()):
-        ax.plot(epochs, values, label=label, linewidth=1.5,
+        ax.plot(epochs, values, label=label, linewidth=1.5, marker="o", markersize=3,
                 alpha=0.85, color=colours[idx % len(colours)])
+    if zero_line:
+        ax.axhline(0.0, color="black", lw=0.8, ls="--", alpha=0.6)
 
     ax.set_xlabel("Epoch")
-    ax.set_ylabel("Value")
-    ax.set_title("Training‑time Metrics")
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
     ax.grid(True, which="both", ls=":", lw=0.5, alpha=0.6)
     if logy:
         ax.set_yscale('log')

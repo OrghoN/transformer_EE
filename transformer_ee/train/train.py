@@ -197,11 +197,19 @@ class MVtrainer:
         coeffs = loss_kwargs["coefficients"]
         n_vars = len(base_loss_names)
 
+        # Half-epoch monitoring: loss.png and accuracy_<target>.png are redrawn at the middle
+        # and at the end of every epoch. Checkpointing and early stopping stay per epoch.
+        n_train_batches = len(self.trainloader)
+        mid_batch = n_train_batches // 2  # number of batches in the first half of an epoch
+
         for epoch in range(self.epochs):
             # ------------------- training -------------------
             self.net.train()
             epoch_total_loss = []
             comp_sum = torch.zeros(n_vars, device=self.gpu_device)
+            # running sums over the current half epoch
+            half_loss = []
+            half_comp = torch.zeros(n_vars, device=self.gpu_device)
 
             for batch_idx, batch in enumerate(self.trainloader):
                 vec, sca, msk, tgt, wgt = [x.to(self.gpu_device) for x in batch]
@@ -236,11 +244,13 @@ class MVtrainer:
 
                 # component‑wise contributions (un‑weighted by alpha/beta)
                 for j, (name, coef) in enumerate(zip(base_loss_names, coeffs)):
-                    comp_sum[j] += (
+                    comp_j = (
                         coef
                         * loss_function[name](out[:, j], tgt[:, j], torch.squeeze(wgt))
                         .detach()
                     )
+                    comp_sum[j] += comp_j
+                    half_comp[j] += comp_j
 
                 # step
                 self.optimizer.zero_grad()
@@ -277,33 +287,36 @@ class MVtrainer:
                 if batch_idx % self.print_interval == 0:
                     print(f"Epoch: {epoch}, batch: {batch_idx} Loss: {lcl_loss:0.4f}")
 
+                half_loss.append(lcl_loss.detach())
+
+                # ---- mid-epoch monitoring point (validation + plots, no checkpoint) ----
+                if mid_batch > 0 and batch_idx + 1 == mid_batch:
+                    val_loss, _, val_out, val_tgt = self._validate_LCL(
+                        loss_kwargs, base_loss_names, coeffs, n_vars
+                    )
+                    self._record_half_epoch(
+                        epoch + (batch_idx + 1) / n_train_batches,
+                        half_loss, half_comp / len(half_loss), val_loss, val_out, val_tgt,
+                    )
+                    half_loss = []
+                    half_comp = torch.zeros(n_vars, device=self.gpu_device)
+                    self.net.train()
+
             # epoch aggregates
             self.train_loss_list_per_epoch.append(torch.mean(torch.tensor(epoch_total_loss)))
             self.train_comp_loss_per_epoch.append(comp_sum / len(self.trainloader))
 
             # ------------------- validation -------------------
-            self.net.eval()
-            epoch_val_loss = []
-            comp_val_sum = torch.zeros(n_vars, device=self.gpu_device)
+            val_loss, val_comp, val_out, val_tgt = self._validate_LCL(
+                loss_kwargs, base_loss_names, coeffs, n_vars
+            )
+            self.valid_loss_list_per_epoch.append(val_loss)
+            self.valid_comp_loss_per_epoch.append(val_comp)
 
-            with torch.no_grad():
-                for batch_idx, batch in enumerate(self.validloader):
-                    vec, sca, msk, tgt, wgt = [x.to(self.gpu_device) for x in batch]
-                    out = self.net.forward(vec, sca, msk)
-
-                    lcl_loss = linear_combination_loss(out, tgt, weight=wgt, **loss_kwargs)
-
-                    for j, (name, coef) in enumerate(zip(base_loss_names, coeffs)):
-                        comp_val_sum[j] += (
-                            coef
-                            * loss_function[name](out[:, j], tgt[:, j], torch.squeeze(wgt))
-                            .detach()
-                        )
-
-                    epoch_val_loss.append(lcl_loss.detach())
-
-            self.valid_loss_list_per_epoch.append(torch.mean(torch.tensor(epoch_val_loss)))
-            self.valid_comp_loss_per_epoch.append(comp_val_sum / len(self.validloader))
+            # end-of-epoch monitoring point (second half of the epoch)
+            self._record_half_epoch(
+                epoch + 1, half_loss, half_comp / max(len(half_loss), 1), val_loss, val_out, val_tgt
+            )
 
             # ---- Optional: epoch-level summaries (once per epoch) ----
             if self.logger is not None:
@@ -325,7 +338,8 @@ class MVtrainer:
                 }, step=int(self.global_step))
 
             # ------------------- bookkeeping & plots -------------------
-            should_stop = self._checkpoint_and_plot(epoch, scheme="LCL", n_vars=n_vars)
+            # loss.png is drawn by _record_half_epoch (half-epoch resolution), not here.
+            should_stop = self._checkpoint_and_plot(epoch, scheme="LCL", n_vars=n_vars, plot=False)
             if should_stop:
                 break
 
@@ -333,6 +347,117 @@ class MVtrainer:
 
         if self.logger:
             self.logger.close()
+
+    # ------------------------------------------------------------------
+    # half-epoch monitoring helpers (used by train_LCL)
+    # ------------------------------------------------------------------
+
+    def _validate_LCL(self, loss_kwargs, base_loss_names, coeffs, n_vars):
+        """One pass over the validation set.
+
+        Returns (mean LCL loss, per-component loss, predictions, targets); predictions and
+        targets are CPU numpy arrays of shape (n_valid, n_targets) in physical units (the
+        targets are not normalised by the dataset).
+        """
+        self.net.eval()
+        val_losses = []
+        comp_val_sum = torch.zeros(n_vars, device=self.gpu_device)
+        outs, tgts = [], []
+        with torch.no_grad():
+            for batch in self.validloader:
+                vec, sca, msk, tgt, wgt = [x.to(self.gpu_device) for x in batch]
+                out = self.net.forward(vec, sca, msk)
+                lcl_loss = linear_combination_loss(out, tgt, weight=wgt, **loss_kwargs)
+                for j, (name, coef) in enumerate(zip(base_loss_names, coeffs)):
+                    comp_val_sum[j] += (
+                        coef * loss_function[name](out[:, j], tgt[:, j], torch.squeeze(wgt)).detach()
+                    )
+                val_losses.append(lcl_loss.detach())
+                outs.append(out.detach().cpu().numpy())
+                tgts.append(tgt.detach().cpu().numpy())
+        return (
+            torch.mean(torch.tensor(val_losses)),
+            comp_val_sum / len(self.validloader),
+            np.concatenate(outs),
+            np.concatenate(tgts),
+        )
+
+    @staticmethod
+    def _accuracy_metrics(pred: np.ndarray, true: np.ndarray) -> Dict[str, float]:
+        """Accuracy of one target on the validation set, from r = (pred - true) / true.
+
+        Only events with true > 0 are used, so the trueLepE = -0.5 placeholder of background
+        events is excluded (same convention as the masked MAPE loss). Unweighted.
+        """
+        sel = true > 0
+        if not np.any(sel):
+            nan = float("nan")
+            return {"mean": nan, "median": nan, "std": nan, "q68": nan, "n": 0}
+        r = (pred[sel] - true[sel]) / true[sel]
+        q16, q50, q84 = np.percentile(r, [16, 50, 84])
+        return {
+            "mean": float(np.mean(r)),
+            "median": float(q50),
+            "std": float(np.std(r)),
+            "q68": float(0.5 * (q84 - q16)),
+            "n": int(sel.sum()),
+        }
+
+    def _record_half_epoch(self, epoch_pos, train_losses, train_comp, val_loss, val_out, val_tgt):
+        """Store one half-epoch point and redraw loss.png, accuracy_<target>.png and
+        training_history.csv in save_path."""
+        if not hasattr(self, "half_epoch_history"):
+            self.half_epoch_history: List[Dict[str, float]] = []
+
+        target_names = self.input_d["target"]
+        row: Dict[str, float] = {
+            "epoch": float(epoch_pos),
+            "train_loss": float(torch.mean(torch.tensor(train_losses)).item()) if train_losses else float("nan"),
+            "valid_loss": float(val_loss.item()),
+        }
+        for j, name in enumerate(target_names):
+            row[f"train_loss_{name}"] = float(train_comp[j].item())
+        for j, name in enumerate(target_names):
+            for k, v in self._accuracy_metrics(val_out[:, j], val_tgt[:, j]).items():
+                row[f"{name}_{k}"] = v
+        self.half_epoch_history.append(row)
+
+        hist = self.half_epoch_history
+        x = [h["epoch"] for h in hist]
+
+        # loss.png, now at half-epoch resolution
+        metrics: Dict[str, List] = {
+            "Training Loss Total": [h["train_loss"] for h in hist],
+            "Validation Loss Total": [h["valid_loss"] for h in hist],
+        }
+        for j, name in enumerate(target_names):
+            metrics[f"Train: Var. {j} ({name})"] = [h[f"train_loss_{name}"] for h in hist]
+        plot_loss(metrics, self.save_path, x=x)
+
+        # accuracy_<target>.png, one per target
+        for name in target_names:
+            acc = {
+                "Bias: mean of (pred-true)/true": [h[f"{name}_mean"] for h in hist],
+                "Bias: median of (pred-true)/true": [h[f"{name}_median"] for h in hist],
+                "Resolution: RMS of (pred-true)/true": [h[f"{name}_std"] for h in hist],
+                "Resolution: 68% half-width of (pred-true)/true": [h[f"{name}_q68"] for h in hist],
+            }
+            safe = name.replace("/", "_").replace(" ", "_")
+            plot_loss(
+                acc, self.save_path, x=x, filename=f"accuracy_{safe}.png", logy=False,
+                ylabel="(pred - true) / true", title=f"Validation accuracy: {name}", zero_line=True,
+            )
+
+        pd.DataFrame(hist).to_csv(os.path.join(self.save_path, "training_history.csv"), index=False)
+
+        summary = ", ".join(
+            f"{name}: bias {row[f'{name}_median']:+.4f}, res68 {row[f'{name}_q68']:.4f}"
+            for name in target_names
+        )
+        print(
+            f"[half-epoch {epoch_pos:.2f}] train_loss: {row['train_loss']:0.4f}, "
+            f"valid_loss: {row['valid_loss']:0.4f} | {summary}"
+        )
 
     # ------------------------------------------------------------------
     # core training loops – LCL + PredInvMass
@@ -513,7 +638,7 @@ class MVtrainer:
         improvement_pct = ((first - best) / baseline) * 100.0
         return improvement_pct < self.early_stopping_min_delta_pct
 
-    def _checkpoint_and_plot(self, epoch: int, scheme: str, n_vars: int) -> bool:
+    def _checkpoint_and_plot(self, epoch: int, scheme: str, n_vars: int, plot: bool = True) -> bool:
         # stdout
         print(
             f"Epoch: {epoch}, train_loss: {self.train_loss_list_per_epoch[-1]:0.4f}, "
@@ -575,8 +700,9 @@ class MVtrainer:
                 }
             )
 
-        # one canvas – many lines
-        plot_loss(metrics, self.save_path)
+        # one canvas – many lines (train_LCL draws loss.png per half epoch instead)
+        if plot:
+            plot_loss(metrics, self.save_path)
 
         if self._should_early_stop():
             self.early_stop_triggered = True

@@ -11,6 +11,7 @@ There is no per-sample cache: building one event from the arrays takes microseco
 of all events (~3 kB each) would cost tens of GB.
 """
 
+import gc
 import os
 
 import numpy as np
@@ -84,6 +85,17 @@ def _event_weights(config, targets, train_rows):
     return np.broadcast_to(np.asarray(w, dtype=np.float32), (n,)).copy()
 
 
+def _freeze_inherited_objects(_worker_id):
+    """
+    DataLoader worker_init_fn. A forked worker inherits the parent's whole Python heap
+    copy-on-write, but the garbage collector writes to every object it scans, so each worker
+    would gradually duplicate that heap (hundreds of MiB with torch loaded). gc.freeze() moves
+    the inherited objects out of the collector's reach; objects the worker creates itself are
+    still collected.
+    """
+    gc.freeze()
+
+
 def get_numpy_dataloaders(config: dict):
     """
     The "numpy" counterpart of load.get_train_valid_test_dataloader: same return value
@@ -93,6 +105,11 @@ def get_numpy_dataloaders(config: dict):
         "array_cache":    directory to save/load the raw arrays as .npy (skips re-reading the
                           CSV on later runs). Put it on large storage, not /exp/nova/app.
         "read_block_mib": block size for reading the CSV (default 64).
+        "num_workers_valid": workers for the validation loader (default min(num_workers, 2)).
+                          The trainer validates in the middle of each epoch while the training
+                          workers are still alive, so this keeps the number of processes (and
+                          memory) down; building events from the arrays is cheap and validation
+                          is limited by the GPU.
     """
     arrays = load_or_read_arrays(config, cache_dir=config.get("array_cache"))
     n_events = len(arrays["offsets"]) - 1
@@ -116,9 +133,13 @@ def get_numpy_dataloaders(config: dict):
     num_workers = min(requested, available)
     if num_workers != requested:
         print(f"num_workers: {requested} requested, {available} CPUs available -> {num_workers}")
-    worker_kwargs = (
-        {"multiprocessing_context": "fork"} if num_workers > 0 else {}
-    )
+    num_workers_valid = min(int(config.get("num_workers_valid", 2)), num_workers)
+    print(f"DataLoader workers: train/test {num_workers}, valid {num_workers_valid}")
+
+    def worker_kwargs(n):
+        if n == 0:
+            return {}
+        return {"multiprocessing_context": "fork", "worker_init_fn": _freeze_inherited_objects}
 
     train_collate_fn = normalized_noise(config, stat) if "noise" in config else None
     trainloader = DataLoader(
@@ -128,15 +149,15 @@ def get_numpy_dataloaders(config: dict):
         num_workers=num_workers,
         collate_fn=train_collate_fn,
         pin_memory=torch.cuda.is_available(),
-        **worker_kwargs,
+        **worker_kwargs(num_workers),
     )
     validloader = DataLoader(
         valid_set,
         batch_size=config["batch_size_valid"],
         shuffle=False,
-        num_workers=num_workers,
+        num_workers=num_workers_valid,
         pin_memory=torch.cuda.is_available(),
-        **worker_kwargs,
+        **worker_kwargs(num_workers_valid),
     )
     testloader = DataLoader(
         test_set,
@@ -144,6 +165,6 @@ def get_numpy_dataloaders(config: dict):
         shuffle=False,
         num_workers=num_workers,
         pin_memory=torch.cuda.is_available(),
-        **worker_kwargs,
+        **worker_kwargs(num_workers),
     )
     return trainloader, validloader, testloader, stat

@@ -38,6 +38,45 @@ def beta(epoch: float, b_start: float = 0.01, b_end: float = 1.0, k: float = 1.0
     return b_start + (b_end - b_start) / (1 + math.exp(-k * (epoch - x0)))
 
 # -----------------------------------------------------------------------------
+# Memory monitoring
+# -----------------------------------------------------------------------------
+
+def _memory_in_use_gib() -> float | None:
+    """
+    Memory used by this process and all its descendants (DataLoader workers), in GiB, as the
+    sum of PSS from /proc/<pid>/smaps_rollup: pages shared copy-on-write between the trainer
+    and its forked workers are counted once, as a memory limit counts them.
+    Returns None where /proc does not provide this (non-Linux).
+    """
+    try:
+        children: Dict[int, List[int]] = {}
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            try:
+                with open(f"/proc/{entry}/stat", encoding="ascii") as f:
+                    ppid = int(f.read().rsplit(")", 1)[1].split()[1])
+            except (OSError, IndexError, ValueError):
+                continue
+            children.setdefault(ppid, []).append(int(entry))
+        todo, total_kib = [os.getpid()], 0
+        while todo:
+            pid = todo.pop()
+            todo.extend(children.get(pid, []))
+            try:
+                with open(f"/proc/{pid}/smaps_rollup", encoding="ascii") as f:
+                    for line in f:
+                        if line.startswith("Pss:"):
+                            total_kib += int(line.split()[1])
+                            break
+            except OSError:
+                continue
+        return total_kib / 2**20
+    except OSError:
+        return None
+
+
+# -----------------------------------------------------------------------------
 # Trainer class
 # -----------------------------------------------------------------------------
 
@@ -454,9 +493,11 @@ class MVtrainer:
             f"{name}: bias {row[f'{name}_median']:+.4f}, res68 {row[f'{name}_q68']:.4f}"
             for name in target_names
         )
+        mem = _memory_in_use_gib()
+        mem_txt = f" | host memory {mem:.2f} GiB" if mem is not None else ""
         print(
             f"[half-epoch {epoch_pos:.2f}] train_loss: {row['train_loss']:0.4f}, "
-            f"valid_loss: {row['valid_loss']:0.4f} | {summary}"
+            f"valid_loss: {row['valid_loss']:0.4f} | {summary}{mem_txt}"
         )
 
     # ------------------------------------------------------------------

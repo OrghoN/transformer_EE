@@ -94,6 +94,18 @@ def get_train_valid_test_dataloader(config: dict):  # pylint: disable=R0914
     """
 
     dataframe_type = config.get("dataframe_type", "pandas")
+
+    # Per-sample cache of the pandas/polars datasets. With num_workers > 0 every DataLoader
+    # worker fills its own private copy of the cache, and the workers are recreated at each
+    # epoch (and each validation pass), so the cache is never hit: it only grows, to ~48 GiB
+    # for the 14.6 M-event mag-moment training set. At the half-epoch validation pass the
+    # training workers are still alive holding ~half of it while the validation workers are
+    # forked, and the job is OOM-killed. Off by default when workers are used; set
+    # "sample_cache": true in the config to force it on.
+    num_workers = config.get("num_workers", 10)
+    use_cache = bool(config.get("sample_cache", num_workers == 0))
+    print("per-sample dataset cache:", "on" if use_cache else "off")
+
     if dataframe_type == "numpy":
         # Memory-compact path: streams the CSV into a few float32 arrays, no per-sample cache.
         # See np_reader.py / np_dataset.py.
@@ -113,17 +125,21 @@ def get_train_valid_test_dataloader(config: dict):  # pylint: disable=R0914
         df = pd.read_csv(config["data_path"])
         train_idx, valid_idx, test_idx = get_sample_indices(len(df), config)
         train_set = Normalized_pandas_Dataset_with_cache(
-            config, df.iloc[train_idx].reset_index(drop=True, inplace=False)
+            config,
+            df.iloc[train_idx].reset_index(drop=True, inplace=False),
+            use_cache=use_cache,
         )
         valid_set = Normalized_pandas_Dataset_with_cache(
             config,
             df.iloc[valid_idx].reset_index(drop=True, inplace=False),
             weighter=train_set.weighter,
+            use_cache=use_cache,
         )
         test_set = Normalized_pandas_Dataset_with_cache(
             config,
             df.iloc[test_idx].reset_index(drop=True, inplace=False),
             weighter=train_set.weighter,
+            use_cache=use_cache,
         )
     elif dataframe_type == "polars":
         from transformer_ee.dataloader.pl_dataset import (  # pylint: disable=C0415
@@ -138,17 +154,19 @@ def get_train_valid_test_dataloader(config: dict):  # pylint: disable=R0914
         del df
         sizes = get_sample_sizes(randomdf.height, config)
         train_set = Normalized_Polars_Dataset_with_cache(
-            config, randomdf.slice(offset=0, length=sizes[0])
+            config, randomdf.slice(offset=0, length=sizes[0]), use_cache=use_cache
         )
         valid_set = Normalized_Polars_Dataset_with_cache(
             config,
             randomdf.slice(offset=sizes[0], length=sizes[1]),
             weighter=train_set.weighter,
+            use_cache=use_cache,
         )
         test_set = Normalized_Polars_Dataset_with_cache(
             config,
             randomdf.slice(offset=sizes[0] + sizes[1], length=sizes[2]),
             weighter=train_set.weighter,
+            use_cache=use_cache,
         )
 
     else:
@@ -173,7 +191,7 @@ def get_train_valid_test_dataloader(config: dict):  # pylint: disable=R0914
         train_set,
         batch_size=batch_size_train,
         shuffle=True,
-        num_workers=config.get("num_workers", 10),
+        num_workers=num_workers,
         collate_fn=train_collate_fn,
     )
 
@@ -181,14 +199,14 @@ def get_train_valid_test_dataloader(config: dict):  # pylint: disable=R0914
         valid_set,
         batch_size=batch_size_valid,
         shuffle=False,
-        num_workers=config.get("num_workers", 10),
+        num_workers=num_workers,
     )
 
     testloader = torch.utils.data.DataLoader(
         test_set,
         batch_size=batch_size_test,
         shuffle=False,
-        num_workers=config.get("num_workers", 10),
+        num_workers=num_workers,
     )
 
     return trainloader, validloader, testloader, train_set.stat

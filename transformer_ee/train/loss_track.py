@@ -29,7 +29,7 @@ def _clip_nonpositive(vals: List[float], *, eps: float) -> List[float]:
 
 
 def plot_loss(metrics: Dict[str, ArrayLike], save_path: str, *, filename: str = "loss.png",
-              logy: bool = True, ymin: float = 1e-4, x: ArrayLike = None,
+              logy: bool = False, ymin: float = 1e-4, x: ArrayLike = None,
               ylabel: str = "Value", title: str = "Training‑time Metrics",
               zero_line: bool = False):
     """Plot multiple learning curves on a single canvas.
@@ -42,8 +42,9 @@ def plot_loss(metrics: Dict[str, ArrayLike], save_path: str, *, filename: str = 
         Directory where the figure will be written. Created if absent.
     filename : str, default "loss.png"
         Output file name inside *save_path*.
-    logy : bool, default True
-        If True, use a logarithmic y‑axis.
+    logy : bool, default False
+        If True, use a logarithmic y‑axis. Training loss plots are drawn on a linear
+        y‑axis; pass logy=True explicitly for a log scale.
     ymin : float, default 1e‑3
         Minimum y‑axis value when *logy* is True. Also used to replace any
         non‑positive metric values so log(0) does not raise.

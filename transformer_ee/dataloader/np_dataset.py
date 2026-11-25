@@ -106,10 +106,8 @@ def get_numpy_dataloaders(config: dict):
                           CSV on later runs). Put it on large storage, not /exp/nova/app.
         "read_block_mib": block size for reading the CSV (default 64).
         "num_workers_valid": workers for the validation loader (default min(num_workers, 2)).
-                          The trainer validates in the middle of each epoch while the training
-                          workers are still alive, so this keeps the number of processes (and
-                          memory) down; building events from the arrays is cheap and validation
-                          is limited by the GPU.
+                          Kept small to limit the number of processes (and memory); building
+                          events from the arrays is cheap and validation is limited by the GPU.
     """
     arrays = load_or_read_arrays(config, cache_dir=config.get("array_cache"))
     n_events = len(arrays["offsets"]) - 1

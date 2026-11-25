@@ -120,7 +120,7 @@
     },
     "model": {
         "name": "Transformer_EE_MV",
-        "epochs": 10,
+        "epochs": 20,
         "kwargs": {
             "nhead": 9,
             "num_layers": 12,

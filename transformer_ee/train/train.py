@@ -22,6 +22,7 @@ from .loss import (
     loss_function,  # expose base losses for per‑component tracking
 )
 from .loss_track import plot_loss
+from .energy_plots import DEFAULT_RECO_ESTIMATORS, default_bin_edges, plot_energy_dependence
 from .optimizer import create_optimizer
 
 # -----------------------------------------------------------------------------
@@ -236,19 +237,14 @@ class MVtrainer:
         coeffs = loss_kwargs["coefficients"]
         n_vars = len(base_loss_names)
 
-        # Half-epoch monitoring: loss.png and accuracy_<target>.png are redrawn at the middle
-        # and at the end of every epoch. Checkpointing and early stopping stay per epoch.
-        n_train_batches = len(self.trainloader)
-        mid_batch = n_train_batches // 2  # number of batches in the first half of an epoch
+        # Monitoring: loss.png, accuracy_<target>.png and energy_dependence_<target>.png are
+        # redrawn once per epoch, after the end-of-epoch validation pass.
 
         for epoch in range(self.epochs):
             # ------------------- training -------------------
             self.net.train()
             epoch_total_loss = []
             comp_sum = torch.zeros(n_vars, device=self.gpu_device)
-            # running sums over the current half epoch
-            half_loss = []
-            half_comp = torch.zeros(n_vars, device=self.gpu_device)
 
             for batch_idx, batch in enumerate(self.trainloader):
                 vec, sca, msk, tgt, wgt = [x.to(self.gpu_device) for x in batch]
@@ -289,7 +285,6 @@ class MVtrainer:
                         .detach()
                     )
                     comp_sum[j] += comp_j
-                    half_comp[j] += comp_j
 
                 # step
                 self.optimizer.zero_grad()
@@ -326,20 +321,6 @@ class MVtrainer:
                 if batch_idx % self.print_interval == 0:
                     print(f"Epoch: {epoch}, batch: {batch_idx} Loss: {lcl_loss:0.4f}")
 
-                half_loss.append(lcl_loss.detach())
-
-                # ---- mid-epoch monitoring point (validation + plots, no checkpoint) ----
-                if mid_batch > 0 and batch_idx + 1 == mid_batch:
-                    val_loss, _, val_out, val_tgt = self._validate_LCL(
-                        loss_kwargs, base_loss_names, coeffs, n_vars
-                    )
-                    self._record_half_epoch(
-                        epoch + (batch_idx + 1) / n_train_batches,
-                        half_loss, half_comp / len(half_loss), val_loss, val_out, val_tgt,
-                    )
-                    half_loss = []
-                    half_comp = torch.zeros(n_vars, device=self.gpu_device)
-                    self.net.train()
 
             # epoch aggregates
             self.train_loss_list_per_epoch.append(torch.mean(torch.tensor(epoch_total_loss)))
@@ -352,9 +333,10 @@ class MVtrainer:
             self.valid_loss_list_per_epoch.append(val_loss)
             self.valid_comp_loss_per_epoch.append(val_comp)
 
-            # end-of-epoch monitoring point (second half of the epoch)
-            self._record_half_epoch(
-                epoch + 1, half_loss, half_comp / max(len(half_loss), 1), val_loss, val_out, val_tgt
+            # end-of-epoch monitoring point (plots + CSVs)
+            self._record_epoch(
+                epoch + 1, epoch_total_loss, self.train_comp_loss_per_epoch[-1],
+                val_loss, val_out, val_tgt,
             )
 
             # ---- Optional: epoch-level summaries (once per epoch) ----
@@ -377,7 +359,7 @@ class MVtrainer:
                 }, step=int(self.global_step))
 
             # ------------------- bookkeeping & plots -------------------
-            # loss.png is drawn by _record_half_epoch (half-epoch resolution), not here.
+            # loss.png is drawn by _record_epoch, not here.
             should_stop = self._checkpoint_and_plot(epoch, scheme="LCL", n_vars=n_vars, plot=False)
             if should_stop:
                 break
@@ -388,7 +370,7 @@ class MVtrainer:
             self.logger.close()
 
     # ------------------------------------------------------------------
-    # half-epoch monitoring helpers (used by train_LCL)
+    # per-epoch monitoring helpers (used by train_LCL)
     # ------------------------------------------------------------------
 
     def _validate_LCL(self, loss_kwargs, base_loss_names, coeffs, n_vars):
@@ -442,11 +424,12 @@ class MVtrainer:
             "n": int(sel.sum()),
         }
 
-    def _record_half_epoch(self, epoch_pos, train_losses, train_comp, val_loss, val_out, val_tgt):
-        """Store one half-epoch point and redraw loss.png, accuracy_<target>.png and
-        training_history.csv in save_path."""
-        if not hasattr(self, "half_epoch_history"):
-            self.half_epoch_history: List[Dict[str, float]] = []
+    def _record_epoch(self, epoch_pos, train_losses, train_comp, val_loss, val_out, val_tgt):
+        """Store one per-epoch point (epoch_pos = number of completed epochs) and redraw loss.png (linear y-axis),
+        energy_dependence_<target>.png, accuracy_<target>.png and training_history.csv in
+        save_path."""
+        if not hasattr(self, "epoch_history"):
+            self.epoch_history: List[Dict[str, float]] = []
 
         target_names = self.input_d["target"]
         row: Dict[str, float] = {
@@ -459,19 +442,22 @@ class MVtrainer:
         for j, name in enumerate(target_names):
             for k, v in self._accuracy_metrics(val_out[:, j], val_tgt[:, j]).items():
                 row[f"{name}_{k}"] = v
-        self.half_epoch_history.append(row)
+        self.epoch_history.append(row)
 
-        hist = self.half_epoch_history
+        hist = self.epoch_history
         x = [h["epoch"] for h in hist]
 
-        # loss.png, now at half-epoch resolution
+        # loss.png, one point per epoch
         metrics: Dict[str, List] = {
             "Training Loss Total": [h["train_loss"] for h in hist],
             "Validation Loss Total": [h["valid_loss"] for h in hist],
         }
         for j, name in enumerate(target_names):
             metrics[f"Train: Var. {j} ({name})"] = [h[f"train_loss_{name}"] for h in hist]
-        plot_loss(metrics, self.save_path, x=x)
+        plot_loss(metrics, self.save_path, x=x, logy=False)
+
+        # energy_dependence_<target>.png: accuracy vs true energy, model vs standard reco
+        self._plot_energy_dependence(epoch_pos, val_out, val_tgt)
 
         # accuracy_<target>.png, one per target
         for name in target_names:
@@ -496,8 +482,75 @@ class MVtrainer:
         mem = _memory_in_use_gib()
         mem_txt = f" | host memory {mem:.2f} GiB" if mem is not None else ""
         print(
-            f"[half-epoch {epoch_pos:.2f}] train_loss: {row['train_loss']:0.4f}, "
+            f"[epoch {epoch_pos:.0f} done] train_loss: {row['train_loss']:0.4f}, "
             f"valid_loss: {row['valid_loss']:0.4f} | {summary}{mem_txt}"
+        )
+
+    def _valid_eval_columns(self) -> Dict[str, np.ndarray]:
+        """Raw config "eval_columns" of the validation set (row order = validloader order,
+        which does not shuffle), as name -> float array. Read once and cached."""
+        if not hasattr(self, "_valid_extra_cache"):
+            cols: Dict[str, np.ndarray] = {}
+            extra = getattr(self.validloader.dataset, "extra", None)
+            if extra is not None and getattr(extra, "width", 0) > 0:
+                for name in extra.columns:
+                    cols[name] = extra[name].to_numpy().astype(np.float64)
+            self._valid_extra_cache = cols
+        return self._valid_extra_cache
+
+    def _plot_energy_dependence(self, epoch_pos, val_out, val_tgt):
+        """Per target, binned in true energy: median estimate, bias and resolution of the model
+        and of the standard reco estimators, on the validation set.
+
+        Writes save_path/energy_dependence_<target>.png (latest), a snapshot per epoch in
+        save_path/energy_dependence/, and writes the binned numbers of all epochs so far
+        to energy_dependence.csv.
+        Config (optional): "reco_comparison" {target: [eval column, ...]} and
+        "energy_bins" {target: [bin edges in GeV]}.
+        """
+        extra = self._valid_eval_columns()
+        reco_cfg = self.input_d.get("reco_comparison", DEFAULT_RECO_ESTIMATORS)
+        bins_cfg = self.input_d.get("energy_bins", {})
+        if not hasattr(self, "_energy_bin_edges"):
+            self._energy_bin_edges: Dict[str, np.ndarray] = {}
+
+        n_valid = len(val_tgt)
+        selections = {"all validation events": np.ones(n_valid, dtype=bool)}
+        if "passAnaFull" in extra and len(extra["passAnaFull"]) == n_valid:
+            selections["passAnaFull (analysis selection)"] = extra["passAnaFull"] > 0.5
+
+        rows = []
+        for j, name in enumerate(self.input_d["target"]):
+            true = val_tgt[:, j].astype(np.float64)
+            estimators = {"transformer": val_out[:, j].astype(np.float64)}
+            for col in reco_cfg.get(name, []):
+                if col in extra and len(extra[col]) == n_valid:
+                    estimators[col] = extra[col]
+                elif not getattr(self, "_warned_missing_reco", False):
+                    print(f"[WARN] reco estimator '{col}' for {name} is not in eval_columns; skipped")
+            # bins are fixed at the first call so that plots of different epochs are comparable
+            if name not in self._energy_bin_edges:
+                self._energy_bin_edges[name] = (
+                    np.asarray(bins_cfg[name], dtype=float) if name in bins_cfg
+                    else default_bin_edges(true)
+                )
+            safe = name.replace("/", "_").replace(" ", "_")
+            snapshot = os.path.join(
+                self.save_path, "energy_dependence", f"energy_dependence_{safe}_epoch{int(round(epoch_pos)):03d}.png"
+            )
+            latest = os.path.join(self.save_path, f"energy_dependence_{safe}.png")
+            rows += plot_energy_dependence(
+                true, estimators, selections, self._energy_bin_edges[name], [snapshot, latest],
+                target=name, epoch=epoch_pos,
+            )
+        self._warned_missing_reco = True
+
+        # kept in memory and rewritten whole, like training_history.csv
+        if not hasattr(self, "_energy_dependence_rows"):
+            self._energy_dependence_rows: List[Dict] = []
+        self._energy_dependence_rows += rows
+        pd.DataFrame(self._energy_dependence_rows).to_csv(
+            os.path.join(self.save_path, "energy_dependence.csv"), index=False
         )
 
     # ------------------------------------------------------------------
@@ -741,9 +794,9 @@ class MVtrainer:
                 }
             )
 
-        # one canvas – many lines (train_LCL draws loss.png per half epoch instead)
+        # one canvas – many lines (train_LCL draws loss.png in _record_epoch instead)
         if plot:
-            plot_loss(metrics, self.save_path)
+            plot_loss(metrics, self.save_path, logy=False)
 
         if self._should_early_stop():
             self.early_stop_triggered = True

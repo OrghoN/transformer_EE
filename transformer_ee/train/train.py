@@ -22,7 +22,12 @@ from .loss import (
     loss_function,  # expose base losses for per‑component tracking
 )
 from .loss_track import plot_loss
-from .energy_plots import DEFAULT_RECO_ESTIMATORS, default_bin_edges, plot_energy_dependence
+from .energy_plots import (
+    DEFAULT_RECO_ESTIMATORS,
+    full_range_bin_edges,
+    low_energy_bin_edges,
+    plot_energy_dependence,
+)
 from .optimizer import create_optimizer
 
 # -----------------------------------------------------------------------------
@@ -456,7 +461,8 @@ class MVtrainer:
             metrics[f"Train: Var. {j} ({name})"] = [h[f"train_loss_{name}"] for h in hist]
         plot_loss(metrics, self.save_path, x=x, logy=False)
 
-        # energy_dependence_<target>.png: accuracy vs true energy, model vs standard reco
+        # energy_dependence_<target>.png and _lowE.png: median % error vs true energy,
+        # model vs standard reco (overwritten every epoch)
         self._plot_energy_dependence(epoch_pos, val_out, val_tgt)
 
         # accuracy_<target>.png, one per target
@@ -499,20 +505,25 @@ class MVtrainer:
         return self._valid_extra_cache
 
     def _plot_energy_dependence(self, epoch_pos, val_out, val_tgt):
-        """Per target, binned in true energy: median estimate, bias and resolution of the model
-        and of the standard reco estimators, on the validation set.
+        """Per target, binned in true energy: median percent error of the model and of the
+        standard reco estimators on the validation set, as 1D histograms.
 
-        Writes save_path/energy_dependence_<target>.png (latest), a snapshot per epoch in
-        save_path/energy_dependence/, and writes the binned numbers of all epochs so far
-        to energy_dependence.csv.
-        Config (optional): "reco_comparison" {target: [eval column, ...]} and
-        "energy_bins" {target: [bin edges in GeV]}.
+        Two figures per target, overwritten every epoch (like loss.png):
+            save_path/energy_dependence_<target>.png       full range, 0 to max true energy
+            save_path/energy_dependence_<target>_lowE.png  0-1.5 GeV, finer bins
+        The binned numbers of all epochs so far are written to energy_dependence.csv.
+        Config (optional): "reco_comparison" {target: [eval column, ...]},
+        "energy_bins" {target: [full-range bin edges in GeV]} and
+        "energy_bins_lowE" {target: [low-energy bin edges in GeV]}.
         """
         extra = self._valid_eval_columns()
         reco_cfg = self.input_d.get("reco_comparison", DEFAULT_RECO_ESTIMATORS)
-        bins_cfg = self.input_d.get("energy_bins", {})
+        bins_cfg = {
+            "full": self.input_d.get("energy_bins", {}),
+            "lowE": self.input_d.get("energy_bins_lowE", {}),
+        }
         if not hasattr(self, "_energy_bin_edges"):
-            self._energy_bin_edges: Dict[str, np.ndarray] = {}
+            self._energy_bin_edges: Dict[tuple, np.ndarray] = {}
 
         n_valid = len(val_tgt)
         selections = {"all validation events": np.ones(n_valid, dtype=bool)}
@@ -528,21 +539,23 @@ class MVtrainer:
                     estimators[col] = extra[col]
                 elif not getattr(self, "_warned_missing_reco", False):
                     print(f"[WARN] reco estimator '{col}' for {name} is not in eval_columns; skipped")
-            # bins are fixed at the first call so that plots of different epochs are comparable
-            if name not in self._energy_bin_edges:
-                self._energy_bin_edges[name] = (
-                    np.asarray(bins_cfg[name], dtype=float) if name in bins_cfg
-                    else default_bin_edges(true)
-                )
             safe = name.replace("/", "_").replace(" ", "_")
-            snapshot = os.path.join(
-                self.save_path, "energy_dependence", f"energy_dependence_{safe}_epoch{int(round(epoch_pos)):03d}.png"
-            )
-            latest = os.path.join(self.save_path, f"energy_dependence_{safe}.png")
-            rows += plot_energy_dependence(
-                true, estimators, selections, self._energy_bin_edges[name], [snapshot, latest],
-                target=name, epoch=epoch_pos,
-            )
+            for range_label, suffix, auto_edges in (
+                ("full", "", lambda: full_range_bin_edges(true)),
+                ("lowE", "_lowE", low_energy_bin_edges),
+            ):
+                # bins are fixed at the first call so that the epochs in the CSV are comparable
+                key = (name, range_label)
+                if key not in self._energy_bin_edges:
+                    cfg = bins_cfg[range_label]
+                    self._energy_bin_edges[key] = (
+                        np.asarray(cfg[name], dtype=float) if name in cfg else auto_edges()
+                    )
+                rows += plot_energy_dependence(
+                    true, estimators, selections, self._energy_bin_edges[key],
+                    os.path.join(self.save_path, f"energy_dependence_{safe}{suffix}.png"),
+                    target=name, epoch=epoch_pos, range_label=range_label,
+                )
         self._warned_missing_reco = True
 
         # kept in memory and rewritten whole, like training_history.csv
